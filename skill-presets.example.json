@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "presets": {
+    "lean": {
+      "codex": {
+        "disable": [
+          "group:azure"
+        ],
+        "enable": [
+          "manage-agent-skills",
+          "openai-docs"
+        ]
+      },
+      "claude": {
+        "disable": [
+          "legacy-context"
+        ],
+        "enable": [
+          "manage-agent-skills"
+        ]
+      },
+      "copilot": {
+        "disable": [],
+        "enable": [
+          "manage-agent-skills"
+        ]
+      },
+      "openclaw": {
+        "disable": [],
+        "enable": [
+          "manage-agent-skills"
+        ]
+      },
+      "hermes": {
+        "disable": [],
+        "enable": [
+          "manage-agent-skills"
+        ]
+      }
+    }
+  }
+}
