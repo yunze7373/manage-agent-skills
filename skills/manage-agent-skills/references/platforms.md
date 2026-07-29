@@ -4,6 +4,24 @@ The manager separates the portable Agent Skills format from each host's
 enablement mechanism. A directory containing `SKILL.md` is portable; its
 visibility controls are not.
 
+## Operating systems
+
+`skillctl.py` supports Windows, macOS, and Linux with Python 3.11 or newer.
+Filesystem discovery, home directories, temporary files, atomic replacement,
+and exact-path matching use Python's native operating-system path behavior.
+The test suite runs on all three operating systems.
+
+An exact-path selector must use the native absolute path reported by `search`:
+
+- Windows: `path:C:\skills\demo\SKILL.md`
+- macOS: `path:/Users/alice/.agents/skills/demo/SKILL.md`
+- Linux: `path:/home/alice/.agents/skills/demo/SKILL.md`
+
+Quote the complete selector when it contains spaces. The manager does not
+translate a Windows path into a POSIX path, or the reverse.
+
+## Host adapters
+
 | Platform | Discovery | Enable/disable backend | Notes |
 | --- | --- | --- | --- |
 | Codex | `~/.agents/skills`, `$CODEX_HOME/skills`, plugin cache | Managed `[[skills.config]]` block in `config.toml` | Existing rules outside the marked block are preserved and can still win. |

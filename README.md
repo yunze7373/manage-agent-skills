@@ -13,12 +13,14 @@ Built by [Han (@yunze7373)](https://github.com/yunze7373) ·
 [![CI](https://github.com/yunze7373/manage-agent-skills/actions/workflows/ci.yml/badge.svg)](https://github.com/yunze7373/manage-agent-skills/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/Agent%20Skills-compatible-111827)](https://agentskills.io/)
-[![Platforms](https://img.shields.io/badge/platforms-5-8B5CF6)](#platform-support)
+[![Hosts](https://img.shields.io/badge/hosts-5-8B5CF6)](#host-platform-support)
+[![OS](https://img.shields.io/badge/OS-Windows%20%7C%20macOS%20%7C%20Linux-2563EB)](#operating-system-support)
 [![No daemon](https://img.shields.io/badge/daemon-none-10B981)](#safety-by-design)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [Quick start](#quick-start) ·
-[Platforms](#platform-support) ·
+[OS support](#operating-system-support) ·
+[Hosts](#host-platform-support) ·
 [Safety](#safety-by-design) ·
 [Presets](#presets) ·
 [Contributing](#contributing)
@@ -46,7 +48,23 @@ host-specific adapters:
 > This project is intentionally on-demand. It does not start a background
 > service, watch skill directories, or move/delete installed skills.
 
-## Platform support
+## Operating system support
+
+The CLI supports Windows, macOS, and Linux with Python 3.11 or newer. Paths are
+interpreted using the native rules of the operating system where `skillctl.py`
+is running.
+
+| Operating system | Exact-path form | CI |
+| --- | --- | :---: |
+| Windows | `path:C:\skills\demo\SKILL.md` | ✅ |
+| macOS | `path:/Users/alice/.agents/skills/demo/SKILL.md` | ✅ |
+| Linux | `path:/home/alice/.agents/skills/demo/SKILL.md` | ✅ |
+
+Use the absolute path reported by `search`. Quote the complete selector when
+the path contains spaces. A path from one operating system is not translated
+into another operating system's path syntax.
+
+## Host platform support
 
 | Host | Discovery | Native control | Support |
 | --- | --- | --- | :---: |
@@ -61,6 +79,8 @@ Detailed semantics and primary references live in
 
 ## Quick start
 
+### Windows PowerShell
+
 ```powershell
 git clone https://github.com/yunze7373/manage-agent-skills.git
 Set-Location manage-agent-skills
@@ -70,6 +90,19 @@ $skillctl = ".\skills\manage-agent-skills\scripts\skillctl.py"
 python $skillctl doctor
 python $skillctl --platform all status
 python $skillctl --platform all search azure
+```
+
+### macOS or Linux
+
+```bash
+git clone https://github.com/yunze7373/manage-agent-skills.git
+cd manage-agent-skills
+python3 -m pip install -r requirements.txt
+
+skillctl="./skills/manage-agent-skills/scripts/skillctl.py"
+python3 "$skillctl" doctor
+python3 "$skillctl" --platform all status
+python3 "$skillctl" --platform all search azure
 ```
 
 Preview a change, then apply the same command without `--dry-run`:
@@ -114,8 +147,26 @@ preset NAME --file FILE
 | --- | --- | --- |
 | Exact name | `openai-docs` | Every discovered item with that host-scoped name |
 | Group | `group:azure` | Every skill in one discovered group |
-| Exact path | `path:C:\skills\demo\SKILL.md` | One installed skill path |
+| Exact path | `path:<native-absolute-path>` | One installed skill path |
 | All | `all` | Every discovered skill on the selected host |
+
+Exact-path examples:
+
+```text
+Windows: path:C:\skills\demo\SKILL.md
+macOS:   path:/Users/alice/.agents/skills/demo/SKILL.md
+Linux:   path:/home/alice/.agents/skills/demo/SKILL.md
+```
+
+For example, quote a selector containing spaces:
+
+```powershell
+python $skillctl --platform codex disable 'path:C:\Agent Skills\demo\SKILL.md' --dry-run
+```
+
+```bash
+python3 "$skillctl" --platform codex disable 'path:/home/alice/Agent Skills/demo/SKILL.md' --dry-run
+```
 
 `manage-agent-skills`, `skill-creator`, and `plugin-creator` are protected from
 bulk disable operations unless `--force` is explicitly supplied.
@@ -173,9 +224,7 @@ Presets make repeatable profiles such as `lean`, `coding`, or `research`
 portable:
 
 ```powershell
-python $skillctl --platform codex preset lean `
-  --file .\skill-presets.example.json `
-  --dry-run
+python $skillctl --platform codex preset lean --file skill-presets.example.json --dry-run
 ```
 
 The format supports per-platform `disable` and `enable` selectors. Disable
@@ -228,18 +277,17 @@ Python standard library.
 
 ## Development
 
-```powershell
+```text
 python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
-python -m py_compile .\skills\manage-agent-skills\scripts\skillctl.py
+python -m py_compile skills/manage-agent-skills/scripts/skillctl.py
 ```
 
 Validate the packaged skill when the OpenAI skill-creator utilities are
 available:
 
-```powershell
-python C:\path\to\skill-creator\scripts\quick_validate.py `
-  .\skills\manage-agent-skills
+```text
+python <path-to-skill-creator>/scripts/quick_validate.py skills/manage-agent-skills
 ```
 
 The CI workflow runs the test suite on Linux, Windows, and macOS.

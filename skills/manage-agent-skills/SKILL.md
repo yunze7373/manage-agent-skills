@@ -17,16 +17,36 @@ Never start a daemon or watcher. Discover current skills again on every invocati
 5. Report the platform, affected skills, config or native command used, backup path,
    and whether a new agent session is required.
 
+Choose the Python launcher available on the current operating system (`python`
+on Windows, commonly `python3` on macOS/Linux) and resolve the skill directory
+before running the script.
+
+Windows PowerShell:
+
 ```powershell
 $skillctl = "<skill-directory>\scripts\skillctl.py"
-python $skillctl doctor
-python $skillctl --platform codex status
-python $skillctl --platform all search azure
-python $skillctl --platform claude disable deploy --dry-run
-python $skillctl --platform claude disable deploy
-python $skillctl --platform copilot enable my-skill --dry-run
-python $skillctl --platform openclaw disable browser-tools --dry-run
-python $skillctl --platform hermes --hermes-scope telegram disable shell-tools --dry-run
+python "$skillctl" doctor
+python "$skillctl" --platform codex status
+python "$skillctl" --platform all search azure
+```
+
+macOS/Linux:
+
+```bash
+skillctl="<skill-directory>/scripts/skillctl.py"
+python3 "$skillctl" doctor
+python3 "$skillctl" --platform codex status
+python3 "$skillctl" --platform all search azure
+```
+
+Mutation commands use the same arguments on every operating system:
+
+```text
+<python> <skillctl> --platform claude disable deploy --dry-run
+<python> <skillctl> --platform claude disable deploy
+<python> <skillctl> --platform copilot enable my-skill --dry-run
+<python> <skillctl> --platform openclaw disable browser-tools --dry-run
+<python> <skillctl> --platform hermes --hermes-scope telegram disable shell-tools --dry-run
 ```
 
 Mutations require an explicit `--platform codex`, `--platform claude`, or
@@ -35,13 +55,25 @@ are exact names, `group:<name>`, `path:<path>`, or `all`; partial names are
 intentionally rejected. Hermes defaults to global scope; pass
 `--hermes-scope <platform>` for a platform-specific disable.
 
+For `path:` selectors, use the native absolute path printed by `search`, and
+quote the entire selector when it contains spaces:
+
+```text
+Windows: path:C:\skills\demo\SKILL.md
+macOS:   path:/Users/alice/.agents/skills/demo/SKILL.md
+Linux:   path:/home/alice/.agents/skills/demo/SKILL.md
+```
+
+Do not translate paths between operating systems; matching uses the path rules
+of the system running `skillctl.py`.
+
 ## Presets
 
 Use a JSON preset file matching `references/presets.md`:
 
-```powershell
-python $skillctl --platform codex preset lean --file .\skill-presets.json --dry-run
-python $skillctl --platform codex preset lean --file .\skill-presets.json
+```text
+<python> <skillctl> --platform codex preset lean --file skill-presets.json --dry-run
+<python> <skillctl> --platform codex preset lean --file skill-presets.json
 ```
 
 ## Safety

@@ -50,6 +50,20 @@ class SelectorTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             skillctl.resolve_selectors(["alp"], inventory)
 
+    def test_exact_path_uses_native_os_rules_and_allows_spaces(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            skill_file = make_skill(Path(temporary) / "skills with spaces", "demo")
+            native_path = str(skill_file.resolve())
+            inventory = [
+                skillctl.Skill("codex", "demo", native_path, "test", "test")
+            ]
+
+            selected = skillctl.resolve_selectors(
+                [f"path:{native_path}"], inventory
+            )
+
+            self.assertEqual(["demo"], [item.name for item in selected])
+
 
 class CodexAdapterTests(unittest.TestCase):
     def test_disable_enable_roundtrip_and_backup(self) -> None:
