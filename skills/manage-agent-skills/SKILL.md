@@ -49,6 +49,14 @@ Mutation commands use the same arguments on every operating system:
 <python> <skillctl> --platform hermes --hermes-scope telegram disable shell-tools --dry-run
 ```
 
+For automation, pass `--json` either before or after the command. Use the
+format that keeps the caller's command template readable:
+
+```text
+<python> <skillctl> --platform all --json status
+<python> <skillctl> --platform all status --json
+```
+
 Mutations require an explicit `--platform codex`, `--platform claude`, or
 `--platform copilot`, `--platform openclaw`, or `--platform hermes`. Selectors
 are exact names, `group:<name>`, `path:<path>`, or `all`; partial names are

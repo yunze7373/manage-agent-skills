@@ -141,6 +141,16 @@ disable SELECTOR...
 preset NAME --file FILE
 ```
 
+### JSON output
+
+Pass `--json` before or after any command when a script needs structured
+output. Both forms are equivalent:
+
+```text
+python <skillctl> --platform all --json status
+python <skillctl> --platform all status --json
+```
+
 ### Selectors
 
 | Selector | Example | Meaning |

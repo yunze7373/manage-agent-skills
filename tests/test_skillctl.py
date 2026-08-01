@@ -65,6 +65,44 @@ class SelectorTests(unittest.TestCase):
             self.assertEqual(["demo"], [item.name for item in selected])
 
 
+class CliParserTests(unittest.TestCase):
+    def test_json_is_accepted_before_or_after_the_command(self) -> None:
+        parser = skillctl.build_parser()
+
+        self.assertTrue(parser.parse_args(["--json", "status"]).json)
+        self.assertTrue(parser.parse_args(["status", "--json"]).json)
+        self.assertTrue(parser.parse_args(["search", "demo", "--json"]).json)
+
+
+class ExplicitSelectorFallbackTests(unittest.TestCase):
+    def test_reserved_selectors_do_not_fall_back_as_names(self) -> None:
+        adapter = mock.Mock()
+        adapter.discover.return_value = []
+
+        for selector in ("ALL", "GROUP:missing", "PATH:C:/missing/SKILL.md"):
+            with self.subTest(selector=selector):
+                with (
+                    mock.patch.object(skillctl, "adapters", return_value=[adapter]),
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "skillctl.py",
+                            "--platform",
+                            "copilot",
+                            "disable",
+                            selector,
+                            "--dry-run",
+                        ],
+                    ),
+                ):
+                    with self.assertRaises(SystemExit) as error:
+                        skillctl.main()
+
+                self.assertIn("No exact skill match", str(error.exception))
+                adapter.mutate.assert_not_called()
+
+
 class CodexAdapterTests(unittest.TestCase):
     def test_disable_enable_roundtrip_and_backup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

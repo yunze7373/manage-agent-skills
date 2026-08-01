@@ -1175,22 +1175,37 @@ def build_parser() -> argparse.ArgumentParser:
         default="global",
         help="Hermes disable scope: global or a platform name such as cli/telegram.",
     )
-    parser.add_argument("--json", action="store_true")
+    json_help = "Emit machine-readable JSON; accepted before or after the command."
+    parser.add_argument("--json", action="store_true", help=json_help)
+
+    def add_command_json(command: argparse.ArgumentParser) -> None:
+        command.add_argument(
+            "--json",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help=json_help,
+        )
+
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("doctor")
-    subparsers.add_parser("status")
+    doctor = subparsers.add_parser("doctor")
+    add_command_json(doctor)
+    status = subparsers.add_parser("status")
+    add_command_json(status)
     search = subparsers.add_parser("search")
     search.add_argument("query")
+    add_command_json(search)
     for action in ("enable", "disable"):
         mutation = subparsers.add_parser(action)
         mutation.add_argument("selectors", nargs="+")
         mutation.add_argument("--dry-run", action="store_true")
         mutation.add_argument("--force", action="store_true")
+        add_command_json(mutation)
     preset = subparsers.add_parser("preset")
     preset.add_argument("name")
     preset.add_argument("--file", type=Path, required=True)
     preset.add_argument("--dry-run", action="store_true")
     preset.add_argument("--force", action="store_true")
+    add_command_json(preset)
     return parser
 
 
@@ -1262,7 +1277,8 @@ def main() -> int:
         targets = resolve_selectors(args.selectors, inventory)
     except SystemExit:
         if args.platform not in {"copilot", "openclaw", "hermes"} or any(
-            value == "all" or value.startswith(("group:", "path:"))
+            value.lower() == "all"
+            or value.lower().startswith(("group:", "path:"))
             for value in args.selectors
         ):
             raise
