@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
 
@@ -24,12 +25,13 @@ sys.modules[SPEC.name] = skillctl
 SPEC.loader.exec_module(skillctl)
 
 
-def make_skill(root: Path, name: str) -> Path:
+def make_skill(root: Path, name: str, frontmatter_name: str | None = None) -> Path:
     directory = root / name
     directory.mkdir(parents=True)
     skill_file = directory / "SKILL.md"
     skill_file.write_text(
-        f"---\nname: {name}\ndescription: Test {name}.\n---\n", encoding="utf-8"
+        f"---\nname: {frontmatter_name or name}\ndescription: Test {name}.\n---\n",
+        encoding="utf-8",
     )
     return skill_file
 
@@ -63,6 +65,68 @@ class SelectorTests(unittest.TestCase):
             )
 
             self.assertEqual(["demo"], [item.name for item in selected])
+
+
+class GroupRuleTests(unittest.TestCase):
+    def test_discovery_groups_carry_no_built_in_taxonomy(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            make_skill(base / "skills", "azure-cost")
+            make_skill(base / "skills", "legacy-billing")
+
+            inventory = skillctl.scan_roots(
+                "codex",
+                [(base / "skills", "shared", "test", skillctl.SKILL_GLOB_DEEP)],
+            )
+
+            self.assertEqual({"shared"}, {item.group for item in inventory})
+
+    def test_user_supplied_patterns_define_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            path = base / "groups.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "groups": {"azure": ["azure-*", "legacy-billing"]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            inventory = [
+                skillctl.Skill("codex", "azure-cost", "", "shared", "test"),
+                skillctl.Skill("codex", "legacy-billing", "", "shared", "test"),
+                skillctl.Skill("codex", "unrelated", "", "shared", "test"),
+            ]
+
+            grouped = skillctl.apply_group_rules(
+                inventory, skillctl.load_group_rules(path)
+            )
+
+            self.assertEqual(
+                {"azure-cost": "azure", "legacy-billing": "azure", "unrelated": "shared"},
+                {item.name: item.group for item in grouped},
+            )
+
+    def test_no_group_file_leaves_discovery_groups_untouched(self) -> None:
+        inventory = [skillctl.Skill("codex", "demo", "", "shared", "test")]
+        self.assertEqual(inventory, skillctl.apply_group_rules(inventory, {}))
+        self.assertEqual({}, skillctl.load_group_rules(None))
+
+    def test_matches_directory_name_when_label_differs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            skill_file = make_skill(base / "skills", "azure-cost", "Azure Cost")
+            inventory = [
+                skillctl.Skill(
+                    "claude", "Azure Cost", str(skill_file), "shared", "test"
+                )
+            ]
+
+            grouped = skillctl.apply_group_rules(inventory, {"azure": ["azure-*"]})
+
+            self.assertEqual("azure", grouped[0].group)
 
 
 class CliParserTests(unittest.TestCase):
@@ -208,7 +272,176 @@ class CodexAdapterTests(unittest.TestCase):
             self.assertNotIn(str(skill_file), updated)
 
 
+class ProjectRootTests(unittest.TestCase):
+    def test_walk_stops_at_repository_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository = Path(temporary).resolve() / "repo"
+            (repository / ".git").mkdir(parents=True)
+            nested = repository / "apps" / "web"
+            nested.mkdir(parents=True)
+
+            roots = skillctl.project_skill_roots(
+                nested, ".claude", "claude", skillctl.SKILL_GLOB_FLAT, True
+            )
+
+            self.assertEqual(
+                [
+                    nested / ".claude" / "skills",
+                    repository / "apps" / ".claude" / "skills",
+                    repository / ".claude" / "skills",
+                ],
+                [root for root, _, _, _ in roots],
+            )
+
+    def test_walk_without_repository_marker_is_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            roots = skillctl.project_skill_roots(
+                base, ".claude", "claude", skillctl.SKILL_GLOB_FLAT, True
+            )
+            self.assertEqual(base.anchor, str(roots[-1][0].parents[1]))
+
+
 class ClaudeAdapterTests(unittest.TestCase):
+    @staticmethod
+    def isolated_tree(base: Path) -> Any:
+        """Keep the developer's real skills out of discovery assertions.
+
+        A temporary directory can sit under the home directory, so the parent
+        walk needs a repository marker as well as a redirected home.
+        """
+        home = base / "home"
+        (home / ".claude" / "skills").mkdir(parents=True, exist_ok=True)
+        (base / ".git").mkdir(exist_ok=True)
+        return mock.patch.object(skillctl.Path, "home", return_value=home)
+
+    def test_override_key_is_the_directory_name_not_the_frontmatter_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            config = base / "settings.json"
+            skill_file = make_skill(
+                base / ".claude" / "skills", "memory-manager", "Memory Manager"
+            )
+            adapter = skillctl.ClaudeAdapter(base, config)
+
+            with self.isolated_tree(base):
+                inventory = adapter.discover()
+                demo = next(
+                    item for item in inventory if item.path == str(skill_file)
+                )
+                self.assertEqual("Memory Manager", demo.name)
+                self.assertEqual("memory-manager", demo.config_key)
+
+                # The command a user types must resolve, the label need not.
+                targets = skillctl.resolve_selectors(["memory-manager"], inventory)
+                result = adapter.mutate("disable", targets, False, False)
+
+            overrides = json.loads(config.read_text(encoding="utf-8"))[
+                "skillOverrides"
+            ]
+            self.assertEqual({"memory-manager": "off"}, overrides)
+            self.assertEqual(
+                {"Memory Manager": "memory-manager"},
+                result["display_name_differs"],
+            )
+
+    def test_all_four_documented_states_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            config = base / "settings.json"
+            skill_file = make_skill(base / ".claude" / "skills", "demo")
+            adapter = skillctl.ClaudeAdapter(base, config)
+            target = skillctl.Skill(
+                "claude", "demo", str(skill_file), "test", "test", "on", "demo"
+            )
+
+            for action, setting, state in (
+                ("name-only", "name-only", "name-only"),
+                ("user-invocable-only", "user-invocable-only", "user-only"),
+                ("user-only", "user-invocable-only", "user-only"),
+                ("off", "off", "off"),
+                ("on", "on", "on"),
+            ):
+                with self.subTest(action=action):
+                    adapter.mutate(action, [target], False, False)
+                    value = json.loads(config.read_text(encoding="utf-8"))
+                    self.assertEqual(setting, value["skillOverrides"]["demo"])
+                    with self.isolated_tree(base):
+                        found = next(
+                            item
+                            for item in adapter.discover()
+                            if item.config_key == "demo"
+                        )
+                    self.assertEqual(state, found.state)
+
+    def test_unrecognized_override_value_is_reported_as_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            config = base / "settings.json"
+            config.write_text(
+                json.dumps({"skillOverrides": {"demo": "sometimes"}}),
+                encoding="utf-8",
+            )
+            make_skill(base / ".claude" / "skills", "demo")
+            adapter = skillctl.ClaudeAdapter(base, config)
+
+            with self.isolated_tree(base):
+                found = next(
+                    item for item in adapter.discover() if item.config_key == "demo"
+                )
+
+            self.assertEqual("unknown", found.state)
+
+    def test_protection_matches_either_identifier_and_only_hiding_states(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            config = base / "settings.json"
+            skill_file = make_skill(
+                base / ".claude" / "skills", "manage-agent-skills", "Skill Switchboard"
+            )
+            adapter = skillctl.ClaudeAdapter(base, config)
+            target = skillctl.Skill(
+                "claude",
+                "Skill Switchboard",
+                str(skill_file),
+                "test",
+                "test",
+                "on",
+                "manage-agent-skills",
+            )
+
+            # The protected identity is the directory name, not the label.
+            with self.assertRaises(SystemExit) as error:
+                adapter.mutate("off", [target], True, False)
+            self.assertIn("manage-agent-skills", str(error.exception))
+
+            # Only states that hide the skill from the menu are protected.
+            self.assertTrue(adapter.mutate("name-only", [target], True, False)["changed"])
+            self.assertTrue(adapter.mutate("off", [target], True, True)["changed"])
+
+    def test_rejects_unsupported_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            adapter = skillctl.ClaudeAdapter(base, base / "settings.json")
+            target = skillctl.Skill("claude", "demo", "", "test", "test", "on", "demo")
+            with self.assertRaises(SystemExit) as error:
+                adapter.mutate("sometimes", [target], True, False)
+            self.assertIn("Unsupported Claude skill state", str(error.exception))
+
+    def test_discovery_ignores_skill_files_nested_inside_a_skill(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            skill_file = make_skill(base / ".claude" / "skills", "demo")
+            bundled = skill_file.parent / "references" / "example"
+            bundled.mkdir(parents=True)
+            (bundled / "SKILL.md").write_text("---\nname: example\n---\n", "utf-8")
+            adapter = skillctl.ClaudeAdapter(base, base / "settings.json")
+
+            with self.isolated_tree(base):
+                inventory = adapter.discover()
+
+            self.assertEqual([str(skill_file)], [item.path for item in inventory])
+
     def test_only_skill_overrides_change(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -231,6 +464,25 @@ class ClaudeAdapterTests(unittest.TestCase):
             adapter.mutate("enable", [target], False, False)
             value = json.loads(config.read_text(encoding="utf-8"))
             self.assertEqual("on", value["skillOverrides"]["demo"])
+
+
+class GradedStateTests(unittest.TestCase):
+    def test_other_platforms_reject_claude_only_states(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            builders = {
+                "codex": skillctl.CodexAdapter(base, base / "config.toml"),
+                "copilot": skillctl.CopilotAdapter(base, base / "settings.json"),
+                "openclaw": skillctl.OpenClawAdapter(base, base / "openclaw.json"),
+                "hermes": skillctl.HermesAdapter(base, base / "config.yaml"),
+            }
+            target = skillctl.Skill("x", "demo", "", "test", "test", "on")
+
+            for platform, adapter in builders.items():
+                with self.subTest(platform=platform):
+                    with self.assertRaises(SystemExit) as error:
+                        adapter.mutate("name-only", [target], True, False)
+                    self.assertIn("only enable and disable", str(error.exception))
 
 
 class CopilotParserTests(unittest.TestCase):

@@ -1,6 +1,6 @@
 ---
 name: manage-agent-skills
-description: Audit, search, enable, disable, and apply presets to installed Agent Skills without deleting their files. Use when the user wants to reduce idle skill context, keep rarely used skills manual, inspect newly installed skills on demand, or manage skills across Codex, Claude Code, GitHub Copilot CLI, OpenClaw, and Hermes Agent.
+description: Manage Agent Skills across Codex, Claude Code, Copilot CLI, OpenClaw, and Hermes. Audit, search, enable, disable, set Claude Code visibility states, and apply presets without deleting files. Use when the user wants to reduce idle skill context, keep rarely used skills manual, inspect newly installed skills on demand, or toggle skills for one specific agent.
 ---
 
 # Manage Agent Skills
@@ -63,6 +63,46 @@ are exact names, `group:<name>`, `path:<path>`, or `all`; partial names are
 intentionally rejected. Hermes defaults to global scope; pass
 `--hermes-scope <platform>` for a platform-specific disable.
 
+A selector matches either the display name or the identifier the host's own
+configuration keys on. When they differ, `search` prints the identifier as
+`(key=...)`; prefer that value.
+
+Groups are discovery sources only (`shared`, `claude-user`, a plugin name).
+No skill is grouped by name unless the user supplies a taxonomy:
+
+```text
+<python> <skillctl> --platform codex --groups my-groups.json disable group:azure --dry-run
+```
+
+The file is `{"version": 1, "groups": {"azure": ["azure-*"]}}`; patterns are
+`fnmatch` style. Never assume a group exists — confirm it with `search` first.
+
+## Claude Code visibility states
+
+Claude Code has four states rather than two. Use `set` to reach the middle
+ones, and prefer `name-only` when the goal is to cut idle context while
+keeping the skill discoverable:
+
+```text
+<python> <skillctl> --platform claude set name-only legacy-context
+<python> <skillctl> --platform claude set user-invocable-only deploy
+<python> <skillctl> --platform claude set off legacy-context --dry-run
+```
+
+| State | Listed to Claude | In `/` menu |
+| --- | --- | --- |
+| `on` | Name and description | Yes |
+| `name-only` | Name only | Yes |
+| `user-invocable-only` | Hidden | Yes |
+| `off` | Hidden | Hidden |
+
+`enable` and `disable` remain shorthand for `on` and `off`. The other
+platforms accept only `enable` and `disable`.
+
+Claude Code keys personal and project skills by **directory name**; the
+frontmatter `name` is only the label shown in listings. The manager writes the
+directory name and reports `display_name_differs` when the two disagree.
+
 For `path:` selectors, use the native absolute path printed by `search`, and
 quote the entire selector when it contains spaces:
 
@@ -89,7 +129,9 @@ Use a JSON preset file matching `references/presets.md`:
 - Do not delete, relocate, or rewrite any installed `SKILL.md`.
 - Keep changes scoped to native platform controls.
 - Codex edits only its marked TOML block.
-- Claude Code edits only `skillOverrides` in its settings JSON.
+- Claude Code edits only `skillOverrides` in its settings JSON. The manager
+  currently reads and writes the user-level file only; a project or local
+  settings file can still override the result.
 - Copilot writes the documented `disabledSkills` setting and uses
   `copilot skill list --json` for native discovery when available.
 - OpenClaw delegates mutations to `openclaw config set` so its JSON5 config is

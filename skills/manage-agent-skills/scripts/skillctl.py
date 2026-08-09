@@ -13,6 +13,7 @@ import sys
 import tempfile
 import tomllib
 from dataclasses import asdict, dataclass
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -33,6 +34,33 @@ PROTECTED_NAMES = {
 }
 PLATFORMS = ("codex", "claude", "copilot", "openclaw", "hermes")
 
+# Claude Code reads personal and project skills one directory deep; plugin and
+# vendor trees nest their skills, so those roots keep a recursive scan.
+SKILL_GLOB_FLAT = "*/SKILL.md"
+SKILL_GLOB_DEEP = "**/SKILL.md"
+
+STATES = ("on", "name-only", "user-only", "off", "unknown")
+
+# Claude Code's four documented skillOverrides values, and the internal state
+# label reported for each. "user-only" matches the /skills menu label.
+CLAUDE_STATE_FROM_SETTING = {
+    "on": "on",
+    "name-only": "name-only",
+    "user-invocable-only": "user-only",
+    "off": "off",
+}
+CLAUDE_SETTING_FROM_ACTION = {
+    "enable": "on",
+    "on": "on",
+    "name-only": "name-only",
+    "user-invocable-only": "user-invocable-only",
+    "user-only": "user-invocable-only",
+    "disable": "off",
+    "off": "off",
+}
+SET_STATES = ("on", "name-only", "user-invocable-only", "user-only", "off")
+BINARY_ACTIONS = {"enable", "disable"}
+
 
 @dataclass(frozen=True)
 class Skill:
@@ -47,6 +75,11 @@ class Skill:
     @property
     def key(self) -> str:
         return path_key(self.path) if self.path else self.name.lower()
+
+    @property
+    def identity(self) -> str:
+        """The identifier the host's own configuration uses for this skill."""
+        return self.config_key or self.name
 
 
 def path_key(value: str | Path) -> str:
@@ -71,43 +104,100 @@ def read_openclaw_skill_key(skill_file: Path, fallback: str) -> str:
     return match.group(1).strip() if match else fallback
 
 
-def scan_roots(platform: str, roots: Iterable[tuple[Path, str, str]]) -> list[Skill]:
+def scan_roots(
+    platform: str, roots: Iterable[tuple[Path, str, str, str]]
+) -> list[Skill]:
     found: dict[str, Skill] = {}
-    for root, group, origin in roots:
+    for root, group, origin, pattern in roots:
         if not root.is_dir():
             continue
-        for skill_file in root.rglob("SKILL.md"):
-            key = path_key(skill_file)
+        for skill_file in sorted(root.glob(pattern)):
+            # Resolve before de-duplicating so one symlinked skill reachable
+            # from two roots is counted once, as the hosts themselves do.
+            resolved = skill_file.resolve()
+            key = path_key(resolved)
             if key in found:
                 continue
-            name = read_skill_name(skill_file)
-            effective_group = group
-            if group == "shared" and (
-                name.startswith(("azure-", "entra-"))
-                or name
-                in {
-                    "airunway-aks-setup",
-                    "appinsights-instrumentation",
-                    "microsoft-foundry",
-                }
-            ):
-                effective_group = "azure"
+            # Groups describe where a skill was discovered. Any other taxonomy
+            # is machine-specific, so it comes from the user's --groups file.
             found[key] = Skill(
                 platform=platform,
-                name=name,
-                path=str(skill_file.resolve()),
-                group=effective_group,
+                name=read_skill_name(skill_file),
+                path=str(resolved),
+                group=group,
                 origin=origin,
             )
     return sorted(found.values(), key=lambda item: (item.group, item.name, item.key))
 
 
-def project_skill_roots(cwd: Path, directory: str, platform: str) -> list[tuple[Path, str, str]]:
-    roots: list[tuple[Path, str, str]] = []
+def load_group_rules(path: Path | None) -> dict[str, list[str]]:
+    """Read an optional user-defined group taxonomy.
+
+    Format: {"version": 1, "groups": {"azure": ["azure-*", "entra-*"]}}
+    """
+    if path is None:
+        return {}
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise SystemExit(f"Group file not found: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Invalid group JSON: {exc}") from exc
+    if not isinstance(document, dict) or document.get("version") != 1:
+        raise SystemExit("Group file version must be 1.")
+    groups = document.get("groups", {})
+    if not isinstance(groups, dict):
+        raise SystemExit("Group file groups must be an object.")
+    rules: dict[str, list[str]] = {}
+    for group, patterns in groups.items():
+        if not isinstance(patterns, list) or not all(
+            isinstance(item, str) for item in patterns
+        ):
+            raise SystemExit(f"Group {group!r} must map to an array of patterns.")
+        rules[str(group)] = patterns
+    return rules
+
+
+def apply_group_rules(
+    inventory: list[Skill], rules: dict[str, list[str]]
+) -> list[Skill]:
+    """Re-group skills whose name, identifier, or directory matches a pattern."""
+    if not rules:
+        return inventory
+    result: list[Skill] = []
+    for item in inventory:
+        candidates = {item.name.lower(), item.identity.lower()}
+        if item.path:
+            candidates.add(Path(item.path).parent.name.lower())
+        group = item.group
+        for name, patterns in rules.items():
+            if any(
+                fnmatch(candidate, pattern.lower())
+                for candidate in candidates
+                for pattern in patterns
+            ):
+                group = name
+                break
+        result.append(Skill(**{**asdict(item), "group": group}))
+    return sorted(result, key=lambda item: (item.group, item.name, item.key))
+
+
+def project_skill_roots(
+    cwd: Path,
+    directory: str,
+    platform: str,
+    pattern: str = SKILL_GLOB_DEEP,
+    stop_at_repo_root: bool = False,
+) -> list[tuple[Path, str, str, str]]:
+    roots: list[tuple[Path, str, str, str]] = []
     current = cwd.resolve()
     while True:
         root = current / directory / "skills"
-        roots.append((root, f"{platform}-project", f"project:{current}"))
+        roots.append((root, f"{platform}-project", f"project:{current}", pattern))
+        # Claude Code stops at the repository root. Without a repository
+        # marker anywhere above, keep walking so nothing is lost.
+        if stop_at_repo_root and (current / ".git").exists():
+            break
         if current.parent == current:
             break
         current = current.parent
@@ -148,7 +238,13 @@ def resolve_selectors(selectors: list[str], inventory: list[Skill]) -> list[Skil
             wanted_path = path_key(selector[5:])
             matches = [item for item in inventory if item.path and item.key == wanted_path]
         else:
-            matches = [item for item in inventory if item.name.lower() == lowered]
+            # A skill is addressable by its display name or by the identifier
+            # its host configuration actually keys on.
+            matches = [
+                item
+                for item in inventory
+                if lowered in {item.name.lower(), item.identity.lower()}
+            ]
         if not matches:
             missing.append(selector)
         for item in matches:
@@ -157,14 +253,26 @@ def resolve_selectors(selectors: list[str], inventory: list[Skill]) -> list[Skil
         terms = [term.lower().removeprefix("group:") for term in missing]
         suggestions = sorted(
             {
-                item.name
+                item.identity
                 for item in inventory
-                if any(term in item.name.lower() for term in terms)
+                if any(
+                    term in item.name.lower() or term in item.identity.lower()
+                    for term in terms
+                )
             }
         )[:10]
         suffix = f" Suggestions: {', '.join(suggestions)}" if suggestions else ""
         raise SystemExit(f"No exact skill match: {', '.join(missing)}.{suffix}")
     return list(selected.values())
+
+
+def require_binary_action(platform: str, action: str) -> None:
+    """Only Claude Code exposes the graded skill states."""
+    if action not in BINARY_ACTIONS:
+        raise SystemExit(
+            f"{platform} supports only enable and disable; "
+            f"{action!r} is a Claude Code skill state."
+        )
 
 
 class CodexAdapter:
@@ -179,10 +287,10 @@ class CodexAdapter:
     def available(self) -> tuple[bool, str]:
         return True, str(self.config)
 
-    def _roots(self) -> list[tuple[Path, str, str]]:
+    def _roots(self) -> list[tuple[Path, str, str, str]]:
         roots = [
-            (Path.home() / ".agents" / "skills", "shared", "user:agents"),
-            (self.home / "skills", "codex", "user:codex"),
+            (Path.home() / ".agents" / "skills", "shared", "user:agents", SKILL_GLOB_DEEP),
+            (self.home / "skills", "codex", "user:codex", SKILL_GLOB_DEEP),
         ]
         cache = self.home / "plugins" / "cache"
         if cache.is_dir():
@@ -192,7 +300,12 @@ class CodexAdapter:
                 for plugin in marketplace.iterdir():
                     if plugin.is_dir():
                         roots.append(
-                            (plugin, plugin.name.lower(), f"plugin:{marketplace.name}")
+                            (
+                                plugin,
+                                plugin.name.lower(),
+                                f"plugin:{marketplace.name}",
+                                SKILL_GLOB_DEEP,
+                            )
                         )
         return roots
 
@@ -312,6 +425,7 @@ class CodexAdapter:
     def mutate(
         self, action: str, targets: list[Skill], dry_run: bool, force: bool
     ) -> dict[str, Any]:
+        require_binary_action(self.name, action)
         text, parsed = self._load()
         managed = self._managed_paths(text)
         all_disabled_paths = {
@@ -382,10 +496,17 @@ class ClaudeAdapter:
     def available(self) -> tuple[bool, str]:
         return True, str(self.config)
 
-    def _roots(self) -> list[tuple[Path, str, str]]:
+    def _roots(self) -> list[tuple[Path, str, str, str]]:
         return [
-            (Path.home() / ".claude" / "skills", "claude-user", "user:claude"),
-            *project_skill_roots(self.cwd, ".claude", "claude"),
+            (
+                Path.home() / ".claude" / "skills",
+                "claude-user",
+                "user:claude",
+                SKILL_GLOB_FLAT,
+            ),
+            *project_skill_roots(
+                self.cwd, ".claude", "claude", SKILL_GLOB_FLAT, True
+            ),
         ]
 
     def _load(self) -> dict[str, Any]:
@@ -402,29 +523,48 @@ class ClaudeAdapter:
             raise SystemExit("Claude skillOverrides must be an object.")
         return value
 
+    @staticmethod
+    def command_name(skill_file: Path) -> str:
+        """Claude Code keys personal and project skills by directory name.
+
+        Frontmatter ``name`` only sets the label shown in skill listings, so an
+        override written under that label would never match.
+        """
+        return skill_file.parent.name
+
     def discover(self) -> list[Skill]:
         settings = self._load()
         overrides = settings.get("skillOverrides", {})
-        return [
-            Skill(
-                **{
-                    **asdict(item),
-                    "state": "off"
-                    if overrides.get(item.name) == "off"
-                    else "manual"
-                    if overrides.get(item.name) == "user-invocable-only"
-                    else "on",
-                }
+        result: list[Skill] = []
+        for item in scan_roots(self.name, self._roots()):
+            command = self.command_name(Path(item.path))
+            configured = overrides.get(command)
+            state = (
+                "on"
+                if configured is None
+                else CLAUDE_STATE_FROM_SETTING.get(str(configured), "unknown")
             )
-            for item in scan_roots(self.name, self._roots())
-        ]
+            result.append(
+                Skill(**{**asdict(item), "state": state, "config_key": command})
+            )
+        return result
 
     def mutate(
         self, action: str, targets: list[Skill], dry_run: bool, force: bool
     ) -> dict[str, Any]:
-        if action == "disable":
+        value = CLAUDE_SETTING_FROM_ACTION.get(action)
+        if value is None:
+            raise SystemExit(
+                f"Unsupported Claude skill state: {action!r}. "
+                "Use one of: " + ", ".join(SET_STATES)
+            )
+        if value == "off":
             protected = sorted(
-                {item.name for item in targets if item.name in PROTECTED_NAMES}
+                {
+                    item.identity
+                    for item in targets
+                    if PROTECTED_NAMES & {item.identity, item.name}
+                }
             )
             if protected and not force:
                 raise SystemExit(
@@ -432,10 +572,14 @@ class ClaudeAdapter:
                 )
         settings = self._load()
         overrides = dict(settings.get("skillOverrides", {}))
-        value = "off" if action == "disable" else "on"
         before = dict(overrides)
+        labels = {
+            item.name: item.identity
+            for item in targets
+            if item.path and item.name != item.identity
+        }
         for item in targets:
-            overrides[item.name] = value
+            overrides[item.identity] = value
         settings["skillOverrides"] = dict(sorted(overrides.items()))
         changed = overrides != before
         backup = None
@@ -443,16 +587,20 @@ class ClaudeAdapter:
             content = json.dumps(settings, ensure_ascii=False, indent=2) + "\n"
             backup = write_atomic(self.config, content)
             self._load()
-        return {
+        result = {
             "platform": self.name,
             "action": action,
-            "targets": sorted({item.name for item in targets}),
+            "state": value,
+            "targets": sorted({item.identity for item in targets}),
             "changed": changed,
             "dry_run": dry_run,
             "config": str(self.config),
             "backup": str(backup) if backup else None,
             "new_session_recommended": changed and not dry_run,
         }
+        if labels:
+            result["display_name_differs"] = labels
+        return result
 
 
 def _walk_json(value: Any) -> Iterable[dict[str, Any]]:
@@ -578,8 +726,13 @@ class CopilotAdapter:
 
     def _fallback(self) -> list[Skill]:
         roots = [
-            (Path.home() / ".copilot" / "skills", "copilot-user", "user:copilot"),
-            (Path.home() / ".agents" / "skills", "shared", "user:agents"),
+            (
+                Path.home() / ".copilot" / "skills",
+                "copilot-user",
+                "user:copilot",
+                SKILL_GLOB_DEEP,
+            ),
+            (Path.home() / ".agents" / "skills", "shared", "user:agents", SKILL_GLOB_DEEP),
             *project_skill_roots(self.cwd, ".github", "copilot"),
             *project_skill_roots(self.cwd, ".agents", "shared"),
             *project_skill_roots(self.cwd, ".claude", "claude-compatible"),
@@ -621,6 +774,7 @@ class CopilotAdapter:
     def mutate(
         self, action: str, targets: list[Skill], dry_run: bool, force: bool
     ) -> dict[str, Any]:
+        require_binary_action(self.name, action)
         if action == "disable":
             protected = sorted(
                 {item.name for item in targets if item.name in PROTECTED_NAMES}
@@ -765,17 +919,33 @@ class OpenClawAdapter:
         value = document.get("skills", {})
         return value if isinstance(value, dict) else {}
 
-    def _roots(self, skills_config: dict[str, Any]) -> list[tuple[Path, str, str]]:
+    def _roots(self, skills_config: dict[str, Any]) -> list[tuple[Path, str, str, str]]:
         roots = [
-            (self.cwd / "skills", "openclaw-workspace", f"workspace:{self.cwd}"),
-            (self.cwd / ".agents" / "skills", "shared-project", f"workspace:{self.cwd}"),
-            (Path.home() / ".agents" / "skills", "shared", "user:agents"),
-            (self.home / "skills", "openclaw-user", "user:openclaw"),
-            (self.home / "workspace" / "skills", "openclaw-workspace", "default-workspace"),
+            (
+                self.cwd / "skills",
+                "openclaw-workspace",
+                f"workspace:{self.cwd}",
+                SKILL_GLOB_DEEP,
+            ),
+            (
+                self.cwd / ".agents" / "skills",
+                "shared-project",
+                f"workspace:{self.cwd}",
+                SKILL_GLOB_DEEP,
+            ),
+            (Path.home() / ".agents" / "skills", "shared", "user:agents", SKILL_GLOB_DEEP),
+            (self.home / "skills", "openclaw-user", "user:openclaw", SKILL_GLOB_DEEP),
+            (
+                self.home / "workspace" / "skills",
+                "openclaw-workspace",
+                "default-workspace",
+                SKILL_GLOB_DEEP,
+            ),
             (
                 self.home / "workspace" / ".agents" / "skills",
                 "shared-project",
                 "default-workspace",
+                SKILL_GLOB_DEEP,
             ),
         ]
         load = skills_config.get("load", {})
@@ -784,7 +954,12 @@ class OpenClawAdapter:
             for value in extra_dirs:
                 if isinstance(value, str):
                     roots.append(
-                        (Path(value).expanduser(), "openclaw-extra", "skills.load.extraDirs")
+                        (
+                            Path(value).expanduser(),
+                            "openclaw-extra",
+                            "skills.load.extraDirs",
+                            SKILL_GLOB_DEEP,
+                        )
                     )
         return roots
 
@@ -837,6 +1012,7 @@ class OpenClawAdapter:
     def mutate(
         self, action: str, targets: list[Skill], dry_run: bool, force: bool
     ) -> dict[str, Any]:
+        require_binary_action(self.name, action)
         if action == "disable":
             protected = sorted(
                 {item.name for item in targets if item.name in PROTECTED_NAMES}
@@ -1008,7 +1184,14 @@ class HermesAdapter:
         global_disabled, platform_disabled = self._disabled(settings, self.scope)
         inventory = scan_roots(
             self.name,
-            [(self.home / "skills", "hermes-home", f"home:{self.home}")],
+            [
+                (
+                    self.home / "skills",
+                    "hermes-home",
+                    f"home:{self.home}",
+                    SKILL_GLOB_DEEP,
+                )
+            ],
         )
         return [
             Skill(
@@ -1026,6 +1209,7 @@ class HermesAdapter:
     def mutate(
         self, action: str, targets: list[Skill], dry_run: bool, force: bool
     ) -> dict[str, Any]:
+        require_binary_action(self.name, action)
         if action == "disable":
             protected = sorted(
                 {item.name for item in targets if item.name in PROTECTED_NAMES}
@@ -1110,14 +1294,16 @@ def adapters(args: argparse.Namespace) -> list[Any]:
     return result
 
 
-def status_payload(selected: list[Any]) -> dict[str, Any]:
+def status_payload(
+    selected: list[Any], rules: dict[str, list[str]] | None = None
+) -> dict[str, Any]:
     platforms: list[dict[str, Any]] = []
     for adapter in selected:
         available, detail = adapter.available()
-        inventory = adapter.discover()
+        inventory = apply_group_rules(adapter.discover(), rules or {})
         counts = {
             state: sum(item.state == state for item in inventory)
-            for state in ("on", "off", "manual", "unknown")
+            for state in STATES
         }
         platforms.append(
             {
@@ -1171,6 +1357,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--openclaw-config", type=Path)
     parser.add_argument("--hermes-config", type=Path)
     parser.add_argument(
+        "--groups",
+        type=Path,
+        help="Optional JSON file defining your own group:<name> taxonomy.",
+    )
+    parser.add_argument(
         "--hermes-scope",
         default="global",
         help="Hermes disable scope: global or a platform name such as cli/telegram.",
@@ -1200,6 +1391,14 @@ def build_parser() -> argparse.ArgumentParser:
         mutation.add_argument("--dry-run", action="store_true")
         mutation.add_argument("--force", action="store_true")
         add_command_json(mutation)
+    setter = subparsers.add_parser(
+        "set", help="Set a Claude Code skill visibility state."
+    )
+    setter.add_argument("state", choices=SET_STATES)
+    setter.add_argument("selectors", nargs="+")
+    setter.add_argument("--dry-run", action="store_true")
+    setter.add_argument("--force", action="store_true")
+    add_command_json(setter)
     preset = subparsers.add_parser("preset")
     preset.add_argument("name")
     preset.add_argument("--file", type=Path, required=True)
@@ -1215,17 +1414,23 @@ def emit(value: Any, as_json: bool) -> None:
         return
     if isinstance(value, dict) and "platforms" in value:
         for row in value["platforms"]:
+            counts = " ".join(f"{state}={row[state]:3}" for state in STATES)
             print(
                 f"{row['platform']:8} available={str(row['available']).lower():5} "
-                f"discovered={row['discovered']:3} on={row['on']:3} "
-                f"off={row['off']:3} manual={row['manual']:3} "
-                f"unknown={row['unknown']:3} {row['detail']}"
+                f"discovered={row['discovered']:3} {counts} {row['detail']}"
             )
         return
     if isinstance(value, list):
         for row in value:
+            key = row.get("config_key", "")
+            # Surface the host's own identifier whenever the label differs.
+            label = (
+                f"{row['name']} (key={key})"
+                if key and key.lower() != row["name"].lower()
+                else row["name"]
+            )
             print(
-                f"{row['platform']:8} {row['state']:7} {row['name']} "
+                f"{row['platform']:8} {row['state']:10} {label} "
                 f"[{row['group']}] {row['path']}"
             )
         print(f"matches={len(value)}")
@@ -1237,16 +1442,18 @@ def emit(value: Any, as_json: bool) -> None:
 def main() -> int:
     args = build_parser().parse_args()
     selected = adapters(args)
+    rules = load_group_rules(args.groups)
     if args.command in {"doctor", "status"}:
-        emit(status_payload(selected), args.json)
+        emit(status_payload(selected, rules), args.json)
         return 0
     if args.command == "search":
         query = args.query.lower()
         rows = [
             asdict(item)
             for adapter in selected
-            for item in adapter.discover()
+            for item in apply_group_rules(adapter.discover(), rules)
             if query in item.name.lower()
+            or query in item.identity.lower()
             or query in item.group.lower()
             or query in item.path.lower()
         ]
@@ -1255,7 +1462,7 @@ def main() -> int:
     if args.platform == "all":
         raise SystemExit("Mutations require an explicit --platform.")
     adapter = selected[0]
-    inventory = adapter.discover()
+    inventory = apply_group_rules(adapter.discover(), rules)
     if args.command == "preset":
         preset = load_preset(args.file, args.name, args.platform)
         resolved = {
@@ -1273,6 +1480,7 @@ def main() -> int:
             )
         emit({"preset": args.name, "results": results}, args.json)
         return 0
+    action = args.state if args.command == "set" else args.command
     try:
         targets = resolve_selectors(args.selectors, inventory)
     except SystemExit:
@@ -1286,7 +1494,7 @@ def main() -> int:
             Skill(args.platform, name, "", args.platform, "explicit-selector")
             for name in args.selectors
         ]
-    result = adapter.mutate(args.command, targets, args.dry_run, args.force)
+    result = adapter.mutate(action, targets, args.dry_run, args.force)
     emit(result, args.json)
     return 0
 

@@ -1,5 +1,11 @@
 {
   "version": 1,
+  "groups": {
+    "azure": [
+      "azure-*",
+      "entra-*"
+    ]
+  },
   "presets": {
     "lean": {
       "codex": {
@@ -7,8 +13,7 @@
           "group:azure"
         ],
         "enable": [
-          "manage-agent-skills",
-          "openai-docs"
+          "manage-agent-skills"
         ]
       },
       "claude": {

@@ -69,10 +69,15 @@ into another operating system's path syntax.
 | Host | Discovery | Native control | Support |
 | --- | --- | --- | :---: |
 | OpenAI Codex | Shared, Codex, and plugin skill roots | Managed `skills.config` overrides | ✅ |
-| Anthropic Claude Code | User and project skill roots | `skillOverrides` | ✅ |
+| Anthropic Claude Code | User and project skill roots | `skillOverrides`, four visibility states | ✅ |
 | GitHub Copilot CLI | Native inventory with filesystem fallback | `disabledSkills` | ✅ |
 | OpenClaw | Native inventory with workspace/user fallback | `skills.entries.<key>.enabled` through the native CLI | ✅ |
 | Hermes Agent | `$HERMES_HOME/skills` | Global or per-platform disable lists | ✅ |
+| Claude Desktop / Cowork | Account-synced, no local config | — | ❌ by design |
+
+Claude Desktop and Cowork enable skills per claude.ai account and sync them at
+session start, so no local adapter can toggle them. Manage those from
+Customize > Skills in the app.
 
 Detailed semantics and primary references live in
 [platforms.md](skills/manage-agent-skills/references/platforms.md).
@@ -138,6 +143,7 @@ status
 search QUERY
 enable SELECTOR...
 disable SELECTOR...
+set STATE SELECTOR...          # Claude Code only
 preset NAME --file FILE
 ```
 
@@ -155,10 +161,32 @@ python <skillctl> --platform all status --json
 
 | Selector | Example | Meaning |
 | --- | --- | --- |
-| Exact name | `openai-docs` | Every discovered item with that host-scoped name |
-| Group | `group:azure` | Every skill in one discovered group |
+| Exact name | `openai-docs` | Every discovered item with that host-scoped name or identifier |
+| Group | `group:claude-user` | Every skill in one group |
 | Exact path | `path:<native-absolute-path>` | One installed skill path |
 | All | `all` | Every discovered skill on the selected host |
+
+### Groups
+
+By default a group is only **where a skill was discovered** — `shared`,
+`claude-user`, `codex-project`, a plugin name, and so on. No skill is grouped
+by its name out of the box, because any such taxonomy is specific to one
+person's machine.
+
+To define your own, pass a JSON file with a `groups` section. Patterns are
+`fnmatch` style and match the display name, the host identifier, or the
+directory name, case-insensitively:
+
+```json
+{ "version": 1, "groups": { "azure": ["azure-*", "entra-*"] } }
+```
+
+```powershell
+python $skillctl --platform codex --groups my-groups.json disable group:azure --dry-run
+```
+
+A preset file may carry the same `groups` section, so one file can serve both
+`--groups` and `--file`.
 
 Exact-path examples:
 
@@ -197,8 +225,33 @@ python $skillctl --platform claude disable legacy-context --dry-run
 python $skillctl --platform claude enable legacy-context
 ```
 
-Use Claude's `user-invocable-only` state directly when a skill should remain
-manually callable while staying out of automatic model discovery.
+Claude Code has four visibility states, reachable with `set`:
+
+| State | Listed to Claude | In `/` menu |
+| --- | --- | --- |
+| `on` | Name and description | Yes |
+| `name-only` | Name only | Yes |
+| `user-invocable-only` | Hidden | Yes |
+| `off` | Hidden | Hidden |
+
+```powershell
+# Cut idle context but keep the skill discoverable and invocable
+python $skillctl --platform claude set name-only legacy-context
+
+# Keep it manually callable, out of automatic model discovery
+python $skillctl --platform claude set user-invocable-only deploy
+```
+
+Claude Code keys personal and project skills by **directory name**. The
+frontmatter `name` is only a display label, so a skill in
+`~/.claude/skills/memory-manager/` with `name: Memory Manager` is keyed
+`memory-manager`. `search` prints the identifier as `(key=...)` whenever the
+two differ, and mutations report `display_name_differs`.
+
+Two current limits: the adapter reads and writes `~/.claude/settings.json`
+only, so a project-level `.claude/settings.local.json` entry can override the
+result; and plugin and bundled skills are not discovered — manage those with
+`/plugin` and `disableBundledSkills`.
 
 ### GitHub Copilot CLI
 
