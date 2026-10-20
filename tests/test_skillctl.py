@@ -168,6 +168,49 @@ class ExplicitSelectorFallbackTests(unittest.TestCase):
 
 
 class CodexAdapterTests(unittest.TestCase):
+    def test_discovery_includes_disabled_plugin_cache_roots_for_context_control(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            (base / ".git").mkdir()
+            home = base / "home"
+            codex_home = home / ".codex"
+            config = codex_home / "config.toml"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                '[plugins."active@market"]\n'
+                "enabled = true\n\n"
+                '[plugins."disabled@market"]\n'
+                "enabled = false\n",
+                encoding="utf-8",
+            )
+            cache = codex_home / "plugins" / "cache"
+            make_skill(cache / "market" / "active" / "1.0" / "skills", "stale")
+            make_skill(
+                cache / "market-remote" / "active" / "0.1" / "skills", "active"
+            )
+            make_skill(
+                cache / "market-remote" / "disabled" / "0.1" / "skills",
+                "disabled",
+            )
+            make_skill(
+                cache / "openai-bundled" / "plugin-backup-old" / "skills",
+                "backup",
+            )
+
+            with mock.patch.object(skillctl.Path, "home", return_value=home):
+                discovered = skillctl.CodexAdapter(base, config).discover()
+
+            self.assertEqual(
+                ["active", "disabled"],
+                sorted(item.name for item in discovered),
+            )
+            active = next(item for item in discovered if item.name == "active")
+            disabled = next(item for item in discovered if item.name == "disabled")
+            self.assertEqual("plugin:market", active.origin)
+            self.assertEqual("active:active", active.config_key)
+            self.assertEqual("on", active.state)
+            self.assertEqual("off", disabled.state)
+
     def test_disable_enable_roundtrip_and_backup(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -183,7 +226,8 @@ class CodexAdapterTests(unittest.TestCase):
             self.assertTrue(disabled["changed"])
             text = config.read_text(encoding="utf-8")
             self.assertIn(skillctl.CODEX_BEGIN, text)
-            self.assertIn(str(skill_file), text)
+            self.assertIn(f"path = '{skill_file}'", text)
+            self.assertTrue(skill_file.exists())
             self.assertTrue(
                 config.with_name(config.name + ".manage-agent-skills.bak").exists()
             )
@@ -191,6 +235,7 @@ class CodexAdapterTests(unittest.TestCase):
             enabled = adapter.mutate("enable", [target], False, False)
             self.assertTrue(enabled["changed"])
             self.assertNotIn(str(skill_file), config.read_text(encoding="utf-8"))
+            self.assertTrue(skill_file.exists())
 
     def test_dry_run_does_not_write(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -244,8 +289,161 @@ class CodexAdapterTests(unittest.TestCase):
             updated = config.read_text(encoding="utf-8")
             self.assertEqual(1, updated.count("name = 'demo'"))
             self.assertNotIn(str(skill_file), updated)
+            self.assertTrue(skill_file.exists())
             with self.assertRaises(SystemExit):
                 adapter.mutate("enable", [target], False, False)
+
+    def test_reconcile_preserves_configured_off_skill_files_and_reports_unverified_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            (base / ".git").mkdir()
+            home = base / "home"
+            skills = home / ".agents" / "skills"
+            skill_file = make_skill(skills, "demo")
+            config = base / "config.toml"
+            config.write_text(
+                "[[skills.config]]\n"
+                "name = 'demo'\n"
+                "enabled = false\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(skillctl.Path, "home", return_value=home):
+                adapter = skillctl.CodexAdapter(base, config)
+                before = skillctl.status_payload([adapter])["platforms"][0]
+                result = adapter.reconcile(False)
+                after = skillctl.status_payload([adapter])["platforms"][0]
+
+            self.assertEqual(1, before["context_unverified"])
+            self.assertFalse(result["changed"])
+            self.assertEqual("unverified", result["context_visibility"])
+            self.assertTrue(skill_file.exists())
+            self.assertEqual(0, after["context_drift"])
+            self.assertEqual(1, after["context_unverified"])
+
+    def test_plugin_name_rule_survives_version_path_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            (base / ".git").mkdir()
+            home = base / "home"
+            codex_home = home / ".codex"
+            config = codex_home / "config.toml"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                '[plugins."demo-plugin@market"]\n'
+                "enabled = true\n",
+                encoding="utf-8",
+            )
+            first = make_skill(
+                codex_home / "plugins" / "cache" / "market" / "demo-plugin" / "1.0" / "skills",
+                "workflow",
+            )
+            with mock.patch.object(skillctl.Path, "home", return_value=home):
+                adapter = skillctl.CodexAdapter(base, config, selector="name")
+                target = next(
+                    item for item in adapter.discover() if item.path == str(first.resolve())
+                )
+                adapter.mutate("disable", [target], False, False)
+                second = make_skill(
+                    codex_home / "plugins" / "cache" / "market" / "demo-plugin" / "2.0" / "skills",
+                    "workflow",
+                )
+                drift = adapter.reconcile(False)
+
+            self.assertIn("name = 'demo-plugin:workflow'", config.read_text(encoding="utf-8"))
+            self.assertEqual("unverified", drift["context_visibility"])
+            self.assertTrue(second.exists())
+
+    def test_reconcile_migrates_managed_plugin_path_rule_to_stable_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            (base / ".git").mkdir()
+            home = base / "home"
+            codex_home = home / ".codex"
+            skill_file = make_skill(
+                codex_home / "plugins" / "cache" / "market" / "demo-plugin" / "1.0" / "skills",
+                "workflow",
+            )
+            config = codex_home / "config.toml"
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(
+                '[plugins."demo-plugin@market"]\n'
+                "enabled = true\n\n"
+                f"{skillctl.CODEX_BEGIN}\n"
+                "# legacy version-bound rule\n\n"
+                "[[skills.config]]\n"
+                f"path = '{skill_file}'\n"
+                "enabled = false\n\n"
+                f"{skillctl.CODEX_END}\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(skillctl.Path, "home", return_value=home):
+                result = skillctl.CodexAdapter(base, config, selector="name").reconcile(False)
+
+            updated = config.read_text(encoding="utf-8")
+            self.assertEqual(1, result["rules_migrated"])
+            self.assertIn("name = 'demo-plugin:workflow'", updated)
+            self.assertNotIn(f"path = '{skill_file}'", updated)
+            self.assertTrue(skill_file.exists())
+
+    def test_reconcile_tracks_plugin_enablement_without_skill_rule(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            (base / ".git").mkdir()
+            home = base / "home"
+            codex_home = home / ".codex"
+            config = codex_home / "config.toml"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                '[plugins."demo-plugin@market"]\n'
+                "enabled = false\n",
+                encoding="utf-8",
+            )
+            skill_file = make_skill(
+                codex_home / "plugins" / "cache" / "market" / "demo-plugin" / "1.0" / "skills",
+                "workflow",
+            )
+
+            with mock.patch.object(skillctl.Path, "home", return_value=home):
+                adapter = skillctl.CodexAdapter(base, config)
+                disabled = adapter.reconcile(False)
+                config.write_text(
+                    '[plugins."demo-plugin@market"]\n'
+                    "enabled = true\n",
+                    encoding="utf-8",
+                )
+                enabled = adapter.reconcile(False)
+
+            self.assertEqual("unverified", disabled["context_visibility"])
+            self.assertEqual("unverified", enabled["context_visibility"])
+            self.assertTrue(skill_file.exists())
+
+    def test_disabled_plugin_wins_over_individual_skill_enable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            (base / ".git").mkdir()
+            home = base / "home"
+            codex_home = home / ".codex"
+            config = codex_home / "config.toml"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                '[plugins."demo-plugin@market"]\n'
+                "enabled = false\n",
+                encoding="utf-8",
+            )
+            skill_file = make_skill(
+                codex_home / "plugins" / "cache" / "market" / "demo-plugin" / "1.0" / "skills",
+                "workflow",
+            )
+
+            with mock.patch.object(skillctl.Path, "home", return_value=home):
+                adapter = skillctl.CodexAdapter(base, config)
+                target = next(item for item in adapter.discover() if item.name == "workflow")
+                result = adapter.mutate("enable", [target], False, False)
+
+            self.assertFalse(result["changed"])
+            self.assertEqual("unverified", result["context_visibility"])
+            self.assertTrue(skill_file.exists())
 
     def test_legacy_managed_block_migrates(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -729,6 +927,146 @@ class PresetTests(unittest.TestCase):
             value = skillctl.load_preset(path, "lean", "codex")
             self.assertEqual(["group:test"], value["disable"])
             self.assertEqual(["manager"], value["enable"])
+
+
+class AntigravityAdapterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory()
+        self.config = Path(self._temporary.name).resolve() / "config"
+        self.active = self.config / "skills"
+        self.parked = self.config / "skills_disabled"
+        make_skill(self.active, "bigquery-sql")
+        make_skill(self.active, "gcp-spark")
+        make_skill(self.active, "keep-me", frontmatter_name="Keep Me Label")
+        self.adapter = skillctl.AntigravityAdapter(Path.cwd(), self.config)
+
+    def tearDown(self) -> None:
+        self._temporary.cleanup()
+
+    def states(self) -> dict[str, str]:
+        return {item.config_key: item.state for item in self.adapter.discover()}
+
+    def test_discovery_reports_location_without_claiming_prompt_visibility(self) -> None:
+        make_skill(self.parked, "old-skill")
+        inventory = {item.config_key: item for item in self.adapter.discover()}
+        self.assertEqual("on", inventory["bigquery-sql"].state)
+        self.assertIsNone(inventory["bigquery-sql"].context_visible)
+        self.assertEqual("off", inventory["old-skill"].state)
+        self.assertIsNone(inventory["old-skill"].context_visible)
+        # Directory name is the addressable identity even when the label differs.
+        selected = skillctl.resolve_selectors(["keep-me"], list(inventory.values()))
+        self.assertEqual(["Keep Me Label"], [item.name for item in selected])
+
+    def test_disable_parks_directory_unchanged_and_enable_restores_it(self) -> None:
+        original = (self.active / "gcp-spark" / "SKILL.md").read_bytes()
+        (self.active / "gcp-spark" / "notes.txt").write_text("extra", encoding="utf-8")
+        targets = skillctl.resolve_selectors(["gcp-spark"], self.adapter.discover())
+
+        result = self.adapter.mutate("disable", targets, dry_run=False, force=False)
+
+        self.assertTrue(result["changed"])
+        self.assertFalse((self.active / "gcp-spark").exists())
+        self.assertEqual(original, (self.parked / "gcp-spark" / "SKILL.md").read_bytes())
+        self.assertTrue((self.parked / "gcp-spark" / "notes.txt").is_file())
+        self.assertEqual("off", self.states()["gcp-spark"])
+
+        targets = skillctl.resolve_selectors(["gcp-spark"], self.adapter.discover())
+        self.adapter.mutate("enable", targets, dry_run=False, force=False)
+        self.assertEqual(original, (self.active / "gcp-spark" / "SKILL.md").read_bytes())
+        self.assertFalse((self.parked / "gcp-spark").exists())
+        self.assertEqual("on", self.states()["gcp-spark"])
+
+    def test_dry_run_reports_moves_without_touching_files(self) -> None:
+        targets = skillctl.resolve_selectors(["bigquery-sql"], self.adapter.discover())
+        result = self.adapter.mutate("disable", targets, dry_run=True, force=False)
+        self.assertFalse(result["new_session_recommended"])
+        self.assertEqual(1, len(result["moves"]))
+        self.assertTrue((self.active / "bigquery-sql").is_dir())
+        self.assertFalse(self.parked.exists())
+
+    def test_repeated_disable_is_idempotent(self) -> None:
+        targets = skillctl.resolve_selectors(["bigquery-sql"], self.adapter.discover())
+        self.adapter.mutate("disable", targets, dry_run=False, force=False)
+        targets = skillctl.resolve_selectors(["bigquery-sql"], self.adapter.discover())
+        result = self.adapter.mutate("disable", targets, dry_run=False, force=False)
+        self.assertFalse(result["changed"])
+        self.assertEqual(["bigquery-sql"], result["unchanged"])
+
+    def test_never_overwrites_an_existing_parked_directory(self) -> None:
+        make_skill(self.parked, "bigquery-sql")
+        (self.parked / "bigquery-sql" / "SKILL.md").write_text("parked copy", encoding="utf-8")
+        targets = [
+            item
+            for item in self.adapter.discover()
+            if item.config_key == "bigquery-sql"
+        ]
+        with self.assertRaises(SystemExit):
+            self.adapter.mutate("disable", targets, dry_run=False, force=False)
+        self.assertTrue((self.active / "bigquery-sql").is_dir())
+        self.assertEqual(
+            "parked copy",
+            (self.parked / "bigquery-sql" / "SKILL.md").read_text(encoding="utf-8"),
+        )
+
+    def test_protected_skill_requires_force(self) -> None:
+        make_skill(self.active, "manage-agent-skills")
+        targets = skillctl.resolve_selectors(
+            ["manage-agent-skills"], self.adapter.discover()
+        )
+        with self.assertRaises(SystemExit):
+            self.adapter.mutate("disable", targets, dry_run=False, force=False)
+        self.assertTrue((self.active / "manage-agent-skills").is_dir())
+
+    def test_refuses_paths_outside_managed_roots(self) -> None:
+        outside = make_skill(Path(self._temporary.name) / "elsewhere", "rogue")
+        rogue = skillctl.Skill(
+            "antigravity", "rogue", str(outside), "antigravity-user", "test", "on", "rogue"
+        )
+        with self.assertRaises(SystemExit):
+            self.adapter.mutate("disable", [rogue], dry_run=False, force=False)
+        self.assertTrue(outside.is_file())
+
+    def test_graded_states_are_rejected(self) -> None:
+        targets = skillctl.resolve_selectors(["gcp-spark"], self.adapter.discover())
+        with self.assertRaises(SystemExit):
+            self.adapter.mutate("name-only", targets, dry_run=False, force=False)
+
+    def test_failed_move_rolls_back_completed_moves(self) -> None:
+        targets = skillctl.resolve_selectors(
+            ["bigquery-sql", "gcp-spark"], self.adapter.discover()
+        )
+        real_rename = skillctl.os.rename
+        calls = {"count": 0}
+
+        def flaky(source: str, destination: str) -> None:
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise OSError("simulated lock")
+            real_rename(source, destination)
+
+        with mock.patch.object(skillctl.os, "rename", side_effect=flaky):
+            with self.assertRaises(SystemExit):
+                self.adapter.mutate("disable", targets, dry_run=False, force=False)
+        self.assertTrue((self.active / "bigquery-sql").is_dir())
+        self.assertTrue((self.active / "gcp-spark").is_dir())
+
+    def test_cli_status_and_group_selector(self) -> None:
+        argv = [
+            "skillctl.py",
+            "--platform",
+            "antigravity",
+            "--antigravity-config",
+            str(self.config),
+            "--json",
+            "disable",
+            "group:antigravity-user",
+            "--dry-run",
+        ]
+        with mock.patch.object(sys, "argv", argv), mock.patch("builtins.print") as printed:
+            self.assertEqual(0, skillctl.main())
+        payload = json.loads(printed.call_args[0][0])
+        self.assertEqual(3, len(payload["moves"]))
+        self.assertTrue((self.active / "gcp-spark").is_dir())
 
 
 if __name__ == "__main__":

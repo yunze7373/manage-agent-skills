@@ -1,149 +1,101 @@
 ---
 name: manage-agent-skills
-description: Manage Agent Skills across Codex, Claude Code, Copilot CLI, OpenClaw, and Hermes. Audit, search, enable, disable, set Claude Code visibility states, and apply presets without deleting files. Use when the user wants to reduce idle skill context, keep rarely used skills manual, inspect newly installed skills on demand, or toggle skills for one specific agent.
+description: Audit installed Agent Skills and manage their host-specific visibility across Codex, Claude Code, Copilot CLI, OpenClaw, Hermes, and Antigravity. Use for skill inventory, duplicate or malformed metadata diagnosis, exact enable/disable changes, Claude visibility states, and reusable presets. Does not install skills or measure actual model token usage.
+metadata:
+  version: "0.2.0"
 ---
 
 # Manage Agent Skills
 
-Use the bundled `scripts/skillctl.py` for deterministic, on-demand management.
-Never start a daemon or watcher. Discover current skills again on every invocation.
+Use `scripts/skillctl.py` for on-demand discovery and scoped changes. Resolve
+this skill's directory first; use `python` or `python3` available on the host.
+PyYAML is required for safe metadata parsing. Never start a watcher.
 
-## Workflow
+## Choose the workflow
 
-1. Run `doctor` or `status` before changing anything.
-2. Use `search` to resolve exact skill names.
-3. Preview mutations with `--dry-run`.
-4. Apply the requested mutation.
-5. Report the platform, affected skills, config or native command used, backup path,
-   and whether a new agent session is required.
-
-Choose the Python launcher available on the current operating system (`python`
-on Windows, commonly `python3` on macOS/Linux) and resolve the skill directory
-before running the script.
-
-Windows PowerShell:
+- **Inventory:** `--platform all status --json` reports configured state.
+- **Diagnose:** `--platform all audit --json` reports malformed metadata,
+  duplicate identities, configuration layers, and compatibility limitations.
+  `audit --strict` returns nonzero for warnings as well as errors. It does not
+  decide whether arbitrary skill instructions are factually up to date.
+- **Find:** `--platform <host> search <query>` prints exact names, host keys,
+  groups and paths. Search is fuzzy; mutations are exact.
+- **Change:** resolve the requested scope, preview with `--dry-run`, then apply
+  the same command. Existing user authorization is sufficient; do not ask for
+  confirmation again solely because a preview completed.
+- **Repeat a profile:** read [references/presets.md](references/presets.md).
+- **Check host/version compatibility:** read
+  [references/platforms.md](references/platforms.md), including its evidence
+  dates and limits. Do not infer current host support from a cache directory.
 
 ```powershell
-$skillctl = "<skill-directory>\scripts\skillctl.py"
-python "$skillctl" doctor
-python "$skillctl" --platform codex status
-python "$skillctl" --platform all search azure
+$skillctl = "<skill-directory>/scripts/skillctl.py"
+python $skillctl --platform all audit --json
+python $skillctl --platform codex search deploy
+python $skillctl --platform codex disable deploy --dry-run
+python $skillctl --platform codex disable deploy
 ```
 
-macOS/Linux:
+Put global options before the command; `--json` also works after it.
+Mutations require one explicit platform. Supported selectors are exact name,
+`group:<name>`, `path:<native-absolute-path>`, and `all`. Quote selectors with
+spaces. Names can match multiple installed copies: review every target.
 
-```bash
-skillctl="<skill-directory>/scripts/skillctl.py"
-python3 "$skillctl" doctor
-python3 "$skillctl" --platform codex status
-python3 "$skillctl" --platform all search azure
-```
+Unknown names fail by default. Only use `--allow-undiscovered` for an explicitly
+requested literal host key on Copilot/OpenClaw/Hermes; it is not typo correction.
+Groups normally identify discovery sources. A `--groups file.json` can define
+user taxonomy; never infer groups from skill names without that file.
 
-Mutation commands use the same arguments on every operating system:
+## Host-specific decisions
+
+**Codex:** default writes documented path rules. Existing name rules are
+preserved. Use `--codex-selector name` only when the exact host build has been
+verified to support name selectors. In that explicit mode, `reconcile`
+converts managed plugin paths into stable names; default reconcile preserves
+paths. Enabling cannot override a disable outside the manager's block.
+Re-scan after a plugin update; path rules may refer to an old version.
+
+**Claude Code:** `enable` / `disable` map to `on` / `off`. Use `set name-only`
+to keep discoverability with less description text, or `set user-invocable-only`
+for manual invocation. Target directory keys printed by `search`. Only the
+selected settings file is written; project, managed, frontmatter and plugin
+controls can affect the actual host result.
+
+**Copilot / OpenClaw / Hermes:** use their native configuration semantics.
+OpenClaw requires its CLI for writes. Hermes `--hermes-scope telegram` targets
+a platform list; global disables still win. Its essential `hermes-agent` skill
+cannot be disabled, even with `--force`.
+
+**Antigravity:** select the surface explicitly when managing CLI skills:
 
 ```text
-<python> <skillctl> --platform claude disable deploy --dry-run
-<python> <skillctl> --platform claude disable deploy
-<python> <skillctl> --platform copilot enable my-skill --dry-run
-<python> <skillctl> --platform openclaw disable browser-tools --dry-run
-<python> <skillctl> --platform hermes --hermes-scope telegram disable shell-tools --dry-run
+<python> <skillctl> --platform antigravity --antigravity-surface cli status
+<python> <skillctl> --platform antigravity --antigravity-surface app disable demo --dry-run
 ```
 
-For automation, pass `--json` either before or after the command. Use the
-format that keeps the caller's command template readable:
+App/IDE defaults to `~/.gemini/config`; current CLI defaults to
+`~/.gemini/antigravity-cli`. `--antigravity-config` overrides either root.
+This adapter parks whole global skill directories in sibling `skills_disabled`;
+explain that move in the preview. It does not manage workspace/plugin copies.
+Do not equate a parked directory with verified absence from a prompt.
 
-```text
-<python> <skillctl> --platform all --json status
-<python> <skillctl> --platform all status --json
-```
+## Recovery and reporting
 
-Mutations require an explicit `--platform codex`, `--platform claude`, or
-`--platform copilot`, `--platform openclaw`, or `--platform hermes`. Selectors
-are exact names, `group:<name>`, `path:<path>`, or `all`; partial names are
-intentionally rejected. Hermes defaults to global scope; pass
-`--hermes-scope <platform>` for a platform-specific disable.
+- Keep installed files unchanged, except the documented Antigravity directory
+  moves. Never overwrite a parked directory or silently recover a failed move.
+- Configuration writes preserve unrelated values. JSONC/YAML formatting can
+  normalize. The first backup is `.manage-agent-skills.bak`; later backups have
+  unique suffixes. Use the exact returned backup path for recovery.
+- Protected authoring/management skills require explicit `--force` to disable.
+  Do not add it automatically to make a bulk operation succeed.
+- Presets preflight all actions; runtime failures may still leave partial
+  changes. Native OpenClaw batches are not transactional. Stop, inspect current
+  state and report recovery evidence before retrying.
+- Report platform/surface, targets, configured scope, changes, backup/move paths,
+  and restart guidance. Distinguish preview, saved configuration, and live host
+  verification. Do not claim measured context savings from local state alone.
+- `doctor` / `status` continue past a broken adapter and return nonzero. Treat
+  zero discovered skills on an errored adapter as unknown, not an empty host.
 
-A selector matches either the display name or the identifier the host's own
-configuration keys on. When they differ, `search` prints the identifier as
-`(key=...)`; prefer that value.
-
-Groups are discovery sources only (`shared`, `claude-user`, a plugin name).
-No skill is grouped by name unless the user supplies a taxonomy:
-
-```text
-<python> <skillctl> --platform codex --groups my-groups.json disable group:azure --dry-run
-```
-
-The file is `{"version": 1, "groups": {"azure": ["azure-*"]}}`; patterns are
-`fnmatch` style. Never assume a group exists — confirm it with `search` first.
-
-## Claude Code visibility states
-
-Claude Code has four states rather than two. Use `set` to reach the middle
-ones, and prefer `name-only` when the goal is to cut idle context while
-keeping the skill discoverable:
-
-```text
-<python> <skillctl> --platform claude set name-only legacy-context
-<python> <skillctl> --platform claude set user-invocable-only deploy
-<python> <skillctl> --platform claude set off legacy-context --dry-run
-```
-
-| State | Listed to Claude | In `/` menu |
-| --- | --- | --- |
-| `on` | Name and description | Yes |
-| `name-only` | Name only | Yes |
-| `user-invocable-only` | Hidden | Yes |
-| `off` | Hidden | Hidden |
-
-`enable` and `disable` remain shorthand for `on` and `off`. The other
-platforms accept only `enable` and `disable`.
-
-Claude Code keys personal and project skills by **directory name**; the
-frontmatter `name` is only the label shown in listings. The manager writes the
-directory name and reports `display_name_differs` when the two disagree.
-
-For `path:` selectors, use the native absolute path printed by `search`, and
-quote the entire selector when it contains spaces:
-
-```text
-Windows: path:C:\skills\demo\SKILL.md
-macOS:   path:/Users/alice/.agents/skills/demo/SKILL.md
-Linux:   path:/home/alice/.agents/skills/demo/SKILL.md
-```
-
-Do not translate paths between operating systems; matching uses the path rules
-of the system running `skillctl.py`.
-
-## Presets
-
-Use a JSON preset file matching `references/presets.md`:
-
-```text
-<python> <skillctl> --platform codex preset lean --file skill-presets.json --dry-run
-<python> <skillctl> --platform codex preset lean --file skill-presets.json
-```
-
-## Safety
-
-- Do not delete, relocate, or rewrite any installed `SKILL.md`.
-- Keep changes scoped to native platform controls.
-- Codex edits only its marked TOML block.
-- Claude Code edits only `skillOverrides` in its settings JSON. The manager
-  currently reads and writes the user-level file only; a project or local
-  settings file can still override the result.
-- Copilot writes the documented `disabledSkills` setting and uses
-  `copilot skill list --json` for native discovery when available.
-- OpenClaw delegates mutations to `openclaw config set` so its JSON5 config is
-  not normalized or hand-edited. Agent allowlists may still restrict a skill.
-- Hermes writes only `skills.disabled` or
-  `skills.platform_disabled.<scope>` in `config.yaml`. PyYAML may normalize
-  formatting and comments, so the backup is the lossless recovery copy.
-- Create a sibling `.manage-agent-skills.bak` before changing a config file.
-- Protect `manage-agent-skills`, `skill-creator`, and `plugin-creator` from
-  disable-all unless the user explicitly requests `--force`.
-- Explain that Codex, Claude Code, OpenClaw, and Hermes changes may require a
-  new session or gateway restart; Copilot follows its native command behavior.
-
-Read `references/platforms.md` when platform semantics or support boundaries
-matter. Read `references/presets.md` only when creating or applying presets.
+See [references/auditing.md](references/auditing.md) for compatibility review,
+exit codes, recovery, and a safe upgrade validation procedure.

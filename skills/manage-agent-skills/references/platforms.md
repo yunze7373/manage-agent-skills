@@ -1,116 +1,115 @@
-# Platform support
+# Platform contracts and evidence
 
-The manager separates the portable Agent Skills format from each host's
-enablement mechanism. A directory containing `SKILL.md` is portable; its
-visibility controls are not.
+Reviewed against primary sources on **2026-10-21**. Documentation checks do not
+certify every installed host version. The adapter reports local configuration;
+none of these adapters measures the current model prompt or actual token savings.
 
-## Operating systems
+## Support matrix
 
-`skillctl.py` supports Windows, macOS, and Linux with Python 3.11 or newer.
-Filesystem discovery, home directories, temporary files, atomic replacement,
-and exact-path matching use Python's native operating-system path behavior.
-The test suite runs on all three operating systems.
-
-An exact-path selector must use the native absolute path reported by `search`:
-
-- Windows: `path:C:\skills\demo\SKILL.md`
-- macOS: `path:/Users/alice/.agents/skills/demo/SKILL.md`
-- Linux: `path:/home/alice/.agents/skills/demo/SKILL.md`
-
-Quote the complete selector when it contains spaces. The manager does not
-translate a Windows path into a POSIX path, or the reverse.
-
-## Host adapters
-
-| Platform | Discovery | Enable/disable backend | Notes |
+| Host | Discovery / write scope | Control | Evidence boundary |
 | --- | --- | --- | --- |
-| Codex | `~/.agents/skills`, `$CODEX_HOME/skills`, plugin cache | Managed `[[skills.config]]` block in `config.toml` | Existing rules outside the marked block are preserved and can still win. |
-| Claude Code | `~/.claude/skills` plus project/parent `.claude/skills`, one directory deep, stopping at the repository root | `skillOverrides` in JSON settings | Four states: `on`, `name-only`, `user-invocable-only`, `off`. Keyed by directory name. Plugin and bundled skills are out of scope; see below. |
-| GitHub Copilot CLI | `copilot skill list --json`, with filesystem fallback | `disabledSkills` in `~/.copilot/settings.json` | JSONC input is accepted; changed files are normalized to JSON after a backup. |
-| OpenClaw | Native `openclaw skills list --json`, with workspace/user/shared filesystem fallback | Native `openclaw config set skills.entries["<key>"].enabled` | Honors `metadata.openclaw.skillKey`. Agent-level skill allowlists are a separate, final visibility filter. |
-| Hermes Agent | `$HERMES_HOME/skills` (default `~/.hermes/skills`) | `skills.disabled` or `skills.platform_disabled.<scope>` in `config.yaml` | Global disable wins over platform scope. YAML formatting/comments may normalize after a lossless backup. |
-| Other hosts | Adapter extension point | Not assumed | Add an adapter only after the host exposes a non-destructive control. |
+| Codex | User/shared, project `.agents/skills`, plugin caches; selected TOML | Managed `[[skills.config]]` | Paths are publicly documented; name mode is host-dependent. Cache presence is not an authoritative installed-plugin registry. |
+| Claude Code | Personal and ancestor project `.claude/skills`, one directory deep; selected user JSON by default | `skillOverrides` | Does not merge managed/local/project settings or implement plugin/bundled controls. |
+| Copilot CLI | Native inventory, otherwise filesystem fallback including `COPILOT_HOME/skills`; selected JSONC | `disabledSkills` | Repository disable lists can further restrict user state. |
+| OpenClaw | Native inventory or workspace/user/shared fallback | Native `config set` | Requires installed CLI for mutation; eligibility and agent allowlists remain host decisions. |
+| Hermes | `$HERMES_HOME/skills`; selected YAML | Global/per-platform disable lists | External skill directories, profiles, environment/app gates are not fully enumerated. |
+| Antigravity App/IDE | Selected global `~/.gemini/config/skills` | Directory parking | Workspace, legacy IDE and plugin roots are not managed. |
+| Antigravity CLI | `--antigravity-surface cli`: `~/.gemini/antigravity-cli/skills` | Directory parking | Plugin controls belong to `agy plugin`; older releases may use different paths. |
 
-## Claude Code specifics
+All filesystem paths use the current OS's native rules. Use the absolute path
+printed by `search`; paths are not translated between Windows, macOS and Linux.
+Python 3.11+ and PyYAML are required. The CI matrix covers all three OSes, with
+additional Python versions on Linux; configured CI is not proof of a completed run.
 
-Claude Code is the host with the largest gap between "a file exists" and "the
-host can see it", so the adapter follows its documented rules exactly:
+## Codex
 
-- **Identity is the directory name.** For a skill under `~/.claude/skills/` or
-  `.claude/skills/`, the frontmatter `name` sets only the label shown in
-  listings; the command and the `skillOverrides` key both come from the
-  directory name. An override written under a differing label silently never
-  matches, so the adapter writes the directory name and reports
-  `display_name_differs`.
-- **Four visibility states**, not two. `name-only` keeps the skill in the `/`
-  menu while removing its description from Claude's idle context, which is the
-  cheapest way to reduce context without losing discoverability.
-- **One directory deep.** Only `<root>/<name>/SKILL.md` is a skill. Files that
-  a skill bundles under its own subdirectories are not separate skills.
-- **Project roots stop at the repository root.** Without a repository marker
-  anywhere above the working directory, the walk continues, so nothing that
-  the host might load is dropped from the report.
+The [skills guide](https://learn.chatgpt.com/docs/build-skills) demonstrates a
+`SKILL.md` path, while the
+[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+describes a containing folder path. The manager recognizes both when reading,
+and writes `SKILL.md` paths by default. Both documents specify `enabled`;
+neither establishes portable `name` selector support.
 
-Known boundaries, not yet covered by an adapter:
+`--codex-selector name` preserves the previous optional stable-name workflow
+for a host verified to support it. It uses `plugin:skill` identities for cached
+plugin skills. `reconcile` migrates managed plugin paths only in this mode.
+It does not migrate external rules, remove installed files, or prove prompt
+metadata exclusion. The legacy `CODEX_SKILL_MANAGER` block remains recognized.
+Malformed managed markers and unsupported manager-owned entries fail closed.
 
-- The manager reads and writes `~/.claude/settings.json` only. Claude Code
-  resolves `managed > local > project > user`, and its own `/skills` menu
-  writes `.claude/settings.local.json`, so a project-level entry can override
-  what this manager reports or writes.
-- Plugin skills are unaffected by `skillOverrides` and are managed through
-  `/plugin`. They are not discovered here.
-- Bundled skills such as `/code-review` exist without a file on disk. They can
-  be targeted by `skillOverrides`, and switched off in bulk with
-  `disableBundledSkills`, but the manager cannot discover them.
-- `.claude/commands/*.md`, directory-qualified nested skills such as
-  `apps/web:deploy`, and `--add-dir` roots are not discovered.
+Plugin activation is inferred from the selected config; inherited policy and
+host defaults may differ. Multiple cache versions and marketplace replacement
+heuristics are reported as inventory evidence, not authoritative host selection.
+Read `audit` warnings before treating reported `on/off` as effective host state.
 
-## Claude Desktop and Cowork
+## Claude Code
 
-Not supported, and not supportable by a local filesystem adapter. Skills for
-the Claude Desktop and Cowork apps are enabled per claude.ai account and synced
-at session start; there is no local configuration file that controls
-visibility. Skills created inside a Cowork session live in an ephemeral
-per-session directory. Manage them from Customize > Skills in the app or from
-the skills settings on claude.ai.
+[Skills](https://code.claude.com/docs/en/skills) documents these settings:
 
-The claude.ai account pool, the Skills API pool, and the Claude Code
-filesystem pool are separate. A skill uploaded to one is not available in the
-others.
+| Value | Catalog | Slash menu |
+| --- | --- | --- |
+| `on` | Name and description | Visible |
+| `name-only` | Name | Visible |
+| `user-invocable-only` | Hidden | Visible |
+| `off` | Hidden | Hidden |
 
-## Design rules
+The adapter uses directory keys and accepts `user-only` as an alias. Its selected
+settings file is only one layer. `audit` flags other project/local files rather
+than guessing a merged result. Frontmatter invocation flags are a separate
+host concern. Plugin skills require `/plugin`; bundled skills and legacy
+commands are not discovered here. The host's `/skill-doctor` is the appropriate
+source for actual usage/context statistics on versions that support it.
 
-- Re-scan on each invocation so newly installed skills appear without a watcher.
-- Distinguish installed from enabled.
-- Prefer native host controls over moving directories.
-- Treat names as host-scoped identifiers. Duplicate names may represent multiple
-  installed paths but one host-level visibility key.
-- Never claim that extensions, plugins, commands, and Agent Skills have identical
-  lifecycle semantics.
+## GitHub Copilot CLI
 
-The Codex adapter recognizes the legacy `CODEX_SKILL_MANAGER` block created by
-`manage-codex-skills`. Its first real mutation rewrites only those markers to
-the new format while preserving the entries.
+The [configuration directory reference](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference)
+documents `disabledSkills` and repository/user union semantics. Removing a user
+entry does not cancel a repository disable. The adapter preserves unrelated
+JSON values, but normalizes JSONC formatting after backing it up. Native
+inventory is preferred when it returns usable JSON; fallback is less complete.
 
-## Adding an adapter
+## OpenClaw
 
-Implement discovery, state reporting, enable, disable, dry-run, and availability
-checks. The adapter must preserve unrelated configuration, write atomically when
-it owns a config file, and never delete a skill directory.
+[Skills](https://docs.openclaw.ai/tools/skills) documents
+`skills.entries.<key>.enabled`, optional `metadata.openclaw.skillKey`, gating
+and allowlists. [Config CLI](https://docs.openclaw.ai/cli/config) is used for
+writes, preserving native JSON5 handling. Filesystem fallback does not fully
+parse JSON5, so unresolved state must remain unknown. A native batch can fail
+after earlier commands succeed; the error reports completed commands and the
+backup. Do not automatically retry an interrupted mutation.
 
-## Primary references
+## Hermes
 
-Verified on 2026-07-29:
+The [native configuration implementation](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/skills_config.py)
+and [skill utilities](https://github.com/NousResearch/hermes-agent/blob/main/agent/skill_utils.py)
+confirm global union platform disable semantics and the essential `hermes-agent`
+exception. The manager refuses to disable that essential skill even with force,
+and excludes common cache and bundled support directories from inventory.
+YAML formatting/comments may normalize; returned backups preserve original bytes.
 
-- [Agent Skills specification](https://agentskills.io/specification)
-- [Codex app-server skill config methods](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md)
-- [Claude Code skills](https://code.claude.com/docs/en/skills)
-- [Claude Code `skillOverrides`](https://code.claude.com/docs/en/settings)
-- [GitHub Copilot CLI skill commands](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-command-reference)
-- [GitHub Copilot CLI `disabledSkills`](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference)
-- [OpenClaw skills](https://docs.openclaw.ai/tools/skills)
-- [OpenClaw configuration CLI](https://docs.openclaw.ai/cli/config)
-- [Hermes Agent skills](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills/)
-- [Hermes Agent configuration](https://hermes-agent.nousresearch.com/docs/user-guide/configuration/)
-- [Hermes native skill configuration implementation](https://github.com/NousResearch/hermes-agent/blob/main/hermes_cli/skills_config.py)
-- [Gemini CLI extensions](https://google-gemini.github.io/gemini-cli/docs/extensions/)
+Hermes also has external directories and runtime eligibility gates. This adapter
+does not replicate the entire resolver; verify those surfaces with Hermes itself.
+
+## Antigravity and Gemini CLI
+
+[Antigravity skills](https://antigravity.google/docs/skills) now distinguishes
+App/IDE and CLI global locations. This supersedes the old adapter's agy 1.2.11
+assumption. The local audit observed agy 1.4.3; only version/help were executed.
+Choose `--antigravity-surface app|cli`, or supply an explicit config directory
+for a known legacy installation. The existing default remains `app` to avoid
+silently changing the meaning of existing commands.
+
+Parking is a manager convention, not a native disable API. The manager moves
+only direct children of the selected roots, refuses redirected roots and
+collisions, attempts batch rollback, and reports incomplete rollback honestly.
+Workspace/plugin copies can remain active. No context visibility is claimed.
+
+[Gemini CLI](https://geminicli.com/docs/cli/skills/) is a separate host with native
+skill management and user/workspace scopes. Do not treat it as Antigravity.
+There is no Gemini adapter in this release; use its native `/skills` commands.
+
+## Other surfaces
+
+Claude Desktop/Cowork and account-hosted skill pools are outside these local
+adapters. Manage them in their host UI. This is a current adapter boundary,
+not a claim that future account APIs can never support management.

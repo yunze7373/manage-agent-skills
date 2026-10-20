@@ -46,6 +46,7 @@ skill-presets.local.json
 *.tmp
 *.temp
 *.manage-agent-skills.bak
+*.manage-agent-skills.*.bak
 
 # Editors
 .idea/

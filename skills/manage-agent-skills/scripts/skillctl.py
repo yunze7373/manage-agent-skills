@@ -18,21 +18,25 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+VERSION = "0.2.0"
 CODEX_BEGIN = "# BEGIN MANAGE_AGENT_SKILLS:CODEX"
 CODEX_END = "# END MANAGE_AGENT_SKILLS:CODEX"
 CODEX_LEGACY_BEGIN = "# BEGIN CODEX_SKILL_MANAGER"
 CODEX_LEGACY_END = "# END CODEX_SKILL_MANAGER"
-FRONTMATTER_NAME = re.compile(r"(?m)^name:\s*[\"']?([^\"'\r\n]+)")
-OPENCLAW_SKILL_KEY = re.compile(
-    r"""(?:["']?skillKey["']?\s*:\s*)["']?([^"',}\]\r\n]+)"""
-)
 PROTECTED_NAMES = {
     "manage-agent-skills",
     "manage-codex-skills",
     "plugin-creator",
     "skill-creator",
 }
-PLATFORMS = ("codex", "claude", "copilot", "openclaw", "hermes")
+PLATFORMS = ("codex", "claude", "copilot", "openclaw", "hermes", "antigravity")
+
+# This Antigravity adapter uses directory parking rather than a native per-skill
+# switch, so it is the one exception to the
+# "never move installed files" rule: a disabled skill is parked, intact, in a
+# sibling directory the host does not read, and moved back on enable.
+ANTIGRAVITY_ACTIVE_DIR = "skills"
+ANTIGRAVITY_DISABLED_DIR = "skills_disabled"
 
 # Claude Code reads personal and project skills one directory deep; plugin and
 # vendor trees nest their skills, so those roots keep a recursive scan.
@@ -71,6 +75,7 @@ class Skill:
     origin: str
     state: str = "unknown"
     config_key: str = ""
+    context_visible: bool | None = None
 
     @property
     def key(self) -> str:
@@ -86,22 +91,47 @@ def path_key(value: str | Path) -> str:
     return os.path.normcase(os.path.normpath(str(value)))
 
 
+def read_frontmatter(skill_file: Path) -> dict[str, Any]:
+    """Read only a bounded YAML header; never interpret examples in the body."""
+    try:
+        with skill_file.open(encoding="utf-8-sig") as stream:
+            head = stream.read(65536)
+    except (OSError, UnicodeError) as exc:
+        raise ValueError("unreadable_skill") from exc
+    lines = head.splitlines()
+    if not lines or lines[0].strip() != "---":
+        raise ValueError("missing_frontmatter")
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        raise ValueError("unclosed_or_oversized_frontmatter")
+    yaml = _load_yaml_module()
+    try:
+        value = yaml.safe_load("\n".join(lines[1:end]))
+    except yaml.YAMLError as exc:
+        raise ValueError("invalid_frontmatter") from exc
+    if not isinstance(value, dict):
+        raise ValueError("frontmatter_not_mapping")
+    return value
+
+
 def read_skill_name(skill_file: Path) -> str:
     try:
-        head = skill_file.read_text(encoding="utf-8", errors="replace")[:8192]
-    except OSError:
+        name = read_frontmatter(skill_file).get("name")
+    except ValueError:
         return skill_file.parent.name
-    match = FRONTMATTER_NAME.search(head)
-    return match.group(1).strip() if match else skill_file.parent.name
+    return name.strip() if isinstance(name, str) and name.strip() else skill_file.parent.name
 
 
 def read_openclaw_skill_key(skill_file: Path, fallback: str) -> str:
     try:
-        head = skill_file.read_text(encoding="utf-8", errors="replace")[:8192]
-    except OSError:
+        metadata = read_frontmatter(skill_file).get("metadata", {})
+        if isinstance(metadata, str):
+            metadata = json.loads(metadata)
+        host = metadata.get("openclaw", {}) if isinstance(metadata, dict) else {}
+        key = host.get("skillKey") if isinstance(host, dict) else None
+    except (ValueError, TypeError):
         return fallback
-    match = OPENCLAW_SKILL_KEY.search(head)
-    return match.group(1).strip() if match else fallback
+    return key.strip() if isinstance(key, str) and key.strip() else fallback
 
 
 def scan_roots(
@@ -112,6 +142,15 @@ def scan_roots(
         if not root.is_dir():
             continue
         for skill_file in sorted(root.glob(pattern)):
+            relative = skill_file.relative_to(root)
+            if platform == "hermes":
+                if any(part in {".git", ".hub", ".archive", ".venv", "node_modules", "__pycache__"}
+                       for part in relative.parts):
+                    continue
+                if any(parent.name in {"references", "scripts", "assets", "templates"}
+                       and (parent.parent / "SKILL.md").is_file()
+                       for parent in skill_file.parents if parent != root):
+                    continue
             # Resolve before de-duplicating so one symlinked skill reachable
             # from two roots is counted once, as the hosts themselves do.
             resolved = skill_file.resolve()
@@ -120,12 +159,19 @@ def scan_roots(
                 continue
             # Groups describe where a skill was discovered. Any other taxonomy
             # is machine-specific, so it comes from the user's --groups file.
+            name = read_skill_name(skill_file)
+            config_key = (
+                f"{group}:{name}"
+                if platform == "codex" and origin.startswith("plugin:")
+                else ""
+            )
             found[key] = Skill(
                 platform=platform,
-                name=read_skill_name(skill_file),
+                name=name,
                 path=str(resolved),
                 group=group,
                 origin=origin,
+                config_key=config_key,
             )
     return sorted(found.values(), key=lambda item: (item.group, item.name, item.key))
 
@@ -204,13 +250,28 @@ def project_skill_roots(
     return roots
 
 
+def backup_file(path: Path) -> Path:
+    """Keep prior recovery copies; never follow an existing backup symlink."""
+    backup = path.with_name(path.name + ".manage-agent-skills.bak")
+    try:
+        handle = os.open(backup, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        handle, name = tempfile.mkstemp(prefix=path.name + ".manage-agent-skills.", suffix=".bak", dir=path.parent)
+        backup = Path(name)
+    try:
+        with os.fdopen(handle, "wb") as stream, path.open("rb") as source:
+            shutil.copyfileobj(source, stream)
+    except BaseException:
+        backup.unlink(missing_ok=True)
+        raise
+    return backup
+
+
 def write_atomic(path: Path, content: str) -> Path | None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    backup = path.with_name(path.name + ".manage-agent-skills.bak")
     backup_result: Path | None = None
     if path.exists():
-        shutil.copy2(path, backup)
-        backup_result = backup
+        backup_result = backup_file(path)
     handle, temp_name = tempfile.mkstemp(
         prefix=path.name + ".", suffix=".tmp", dir=path.parent
     )
@@ -278,8 +339,9 @@ def require_binary_action(platform: str, action: str) -> None:
 class CodexAdapter:
     name = "codex"
 
-    def __init__(self, cwd: Path, config: Path | None = None) -> None:
-        del cwd
+    def __init__(self, cwd: Path, config: Path | None = None, selector: str = "path") -> None:
+        self.cwd = cwd
+        self.selector = selector
         configured_home = os.environ.get("CODEX_HOME")
         self.home = Path(configured_home).expanduser() if configured_home else Path.home() / ".codex"
         self.config = config or self.home / "config.toml"
@@ -289,24 +351,48 @@ class CodexAdapter:
 
     def _roots(self) -> list[tuple[Path, str, str, str]]:
         roots = [
+            *project_skill_roots(self.cwd, ".agents", "codex", SKILL_GLOB_DEEP, True),
             (Path.home() / ".agents" / "skills", "shared", "user:agents", SKILL_GLOB_DEEP),
             (self.home / "skills", "codex", "user:codex", SKILL_GLOB_DEEP),
         ]
         cache = self.home / "plugins" / "cache"
-        if cache.is_dir():
-            for marketplace in cache.iterdir():
-                if not marketplace.is_dir():
+        if not cache.is_dir():
+            return roots
+
+        # Inventory installed plugin roots so their host-native configuration
+        # state can be audited without changing the installed package files.
+        marketplaces = [item for item in cache.iterdir() if item.is_dir()]
+        remote_marketplaces = {
+            item.name.removesuffix("-remote").lower()
+            for item in marketplaces
+            if item.name.lower().endswith("-remote")
+        }
+        for marketplace in marketplaces:
+            if not marketplace.is_dir():
+                continue
+            marketplace_name = marketplace.name.lower()
+            logical_marketplace = marketplace_name.removesuffix("-remote")
+            # Newer Codex builds materialize remote marketplace bundles under
+            # `<marketplace>-remote` while leaving the old hash cache beside it.
+            # Only the remote tree is used by the host in that state. Scanning
+            # both makes one logical Skill appear twice and can restore stale
+            # descriptions that Codex itself no longer references.
+            if (
+                not marketplace_name.endswith("-remote")
+                and marketplace_name in remote_marketplaces
+            ):
+                continue
+            for plugin in marketplace.iterdir():
+                if not plugin.is_dir() or plugin.name.startswith("plugin-backup-"):
                     continue
-                for plugin in marketplace.iterdir():
-                    if plugin.is_dir():
-                        roots.append(
-                            (
-                                plugin,
-                                plugin.name.lower(),
-                                f"plugin:{marketplace.name}",
-                                SKILL_GLOB_DEEP,
-                            )
-                        )
+                roots.append(
+                    (
+                        plugin,
+                        plugin.name.lower(),
+                        f"plugin:{logical_marketplace}",
+                        SKILL_GLOB_DEEP,
+                    )
+                )
         return roots
 
     def _load(self) -> tuple[str, dict[str, Any]]:
@@ -320,10 +406,15 @@ class CodexAdapter:
 
     @staticmethod
     def _entries(parsed: dict[str, Any]) -> list[dict[str, Any]]:
-        entries = parsed.get("skills", {}).get("config", [])
+        skills = parsed.get("skills", {})
+        if not isinstance(skills, dict):
+            raise SystemExit("Codex skills must be a table.")
+        entries = skills.get("config", [])
         if not isinstance(entries, list):
             raise SystemExit("Codex skills.config must be an array of tables.")
-        return [entry for entry in entries if isinstance(entry, dict)]
+        if any(not isinstance(entry, dict) for entry in entries):
+            raise SystemExit("Codex skills.config entries must be tables.")
+        return entries
 
     @staticmethod
     def _managed_span(text: str) -> tuple[int, int, str] | None:
@@ -332,21 +423,19 @@ class CodexAdapter:
             (CODEX_BEGIN, CODEX_END),
             (CODEX_LEGACY_BEGIN, CODEX_LEGACY_END),
         ):
-            start = text.find(begin)
-            if start < 0:
+            begins = list(re.finditer(r"(?m)^" + re.escape(begin) + r"\r?$", text))
+            ends = list(re.finditer(r"(?m)^" + re.escape(end) + r"\r?$", text))
+            if not begins and not ends:
                 continue
-            finish_marker = text.find(end, start + len(begin))
-            if finish_marker < 0:
-                raise SystemExit(f"Found {begin!r} without {end!r}.")
-            finish = finish_marker + len(end)
-            if text.find(begin, finish) >= 0:
-                raise SystemExit(f"Multiple {begin!r} blocks found.")
+            if len(begins) != 1 or len(ends) != 1 or begins[0].start() >= ends[0].start():
+                raise SystemExit("Malformed or duplicate managed Codex markers.")
+            start, finish = begins[0].start(), ends[0].end()
             found.append((start, finish, text[start:finish]))
         if len(found) > 1:
             raise SystemExit("Both current and legacy managed Codex blocks exist.")
         return found[0] if found else None
 
-    def _managed_paths(self, text: str) -> set[str]:
+    def _managed_rules(self, text: str) -> set[tuple[str, str]]:
         span = self._managed_span(text)
         if not span:
             return set()
@@ -358,59 +447,174 @@ class CodexAdapter:
         if not payload:
             return set()
         parsed = tomllib.loads(payload)
+        rules: set[tuple[str, str]] = set()
+        for entry in self._entries(parsed):
+            if (entry.get("enabled") is not False
+                    or set(entry) - {"name", "path", "enabled"}
+                    or sum(isinstance(entry.get(key), str) for key in ("name", "path")) != 1):
+                raise SystemExit("Unsupported rule in managed Codex block; preserve and inspect it before editing.")
+            if isinstance(entry.get("name"), str):
+                rules.add(("name", entry["name"].lower()))
+            elif isinstance(entry.get("path"), str):
+                rules.add(("path", path_key(entry["path"])))
+        return rules
+
+    @staticmethod
+    def _disabled_rules(parsed: dict[str, Any]) -> set[tuple[str, str]]:
+        rules: set[tuple[str, str]] = set()
+        for entry in CodexAdapter._entries(parsed):
+            if entry.get("enabled") is not False:
+                continue
+            if isinstance(entry.get("name"), str):
+                rules.add(("name", entry["name"].lower()))
+            elif isinstance(entry.get("path"), str):
+                rules.add(("path", path_key(entry["path"])))
+        return rules
+
+    @staticmethod
+    def _item_rules(item: Skill) -> set[tuple[str, str]]:
         return {
-            path_key(entry["path"])
-            for entry in self._entries(parsed)
-            if entry.get("enabled") is False and isinstance(entry.get("path"), str)
+            ("name", item.identity.lower()),
+            ("path", item.key),
+            ("path", path_key(Path(item.path).parent)) if item.path else ("path", ""),
         }
+
+    @staticmethod
+    def _enabled_plugins(parsed: dict[str, Any]) -> set[tuple[str, str]]:
+        plugins = parsed.get("plugins", {})
+        if not isinstance(plugins, dict):
+            return set()
+        enabled: set[tuple[str, str]] = set()
+        for identifier, settings in plugins.items():
+            if not isinstance(identifier, str) or not isinstance(settings, dict):
+                continue
+            plugin, separator, marketplace = identifier.rpartition("@")
+            if separator and plugin and marketplace and settings.get("enabled") is True:
+                enabled.add((marketplace.lower(), plugin.lower()))
+        return enabled
+
+    @staticmethod
+    def _plugin_enabled(item: Skill, enabled: set[tuple[str, str]]) -> bool:
+        if not item.origin.startswith("plugin:"):
+            return True
+        marketplace = item.origin.removeprefix("plugin:").lower()
+        return (marketplace, item.group.lower()) in enabled
+
+    def _should_hide(
+        self,
+        item: Skill,
+        disabled: set[tuple[str, str]],
+        enabled_plugins: set[tuple[str, str]],
+    ) -> bool:
+        return bool(self._item_rules(item) & disabled) or not self._plugin_enabled(
+            item, enabled_plugins
+        )
+
+    @staticmethod
+    def _plugin_identity_from_path(value: str) -> str | None:
+        path = Path(value)
+        parts = path.parts
+        lowered = [part.lower() for part in parts]
+        cache_index = next(
+            (
+                index
+                for index in range(len(lowered) - 1)
+                if lowered[index] == "plugins" and lowered[index + 1] == "cache"
+            ),
+            None,
+        )
+        if cache_index is None or cache_index + 3 >= len(parts):
+            return None
+        plugin = parts[cache_index + 3]
+        skills_index = next(
+            (
+                index
+                for index in range(cache_index + 4, len(lowered))
+                if lowered[index] == "skills"
+            ),
+            None,
+        )
+        if skills_index is None or skills_index + 1 >= len(parts):
+            return None
+        name = read_skill_name(path) if path.exists() else parts[-2]
+        return f"{plugin}:{name}".lower()
+
+    @staticmethod
+    def _normalize_managed_rules(
+        managed: set[tuple[str, str]], inventory: list[Skill]
+    ) -> set[tuple[str, str]]:
+        """Replace version-bound plugin paths with stable host identities."""
+        plugin_by_path = {
+            item.key: item
+            for item in inventory
+            if item.origin.startswith("plugin:")
+        }
+        normalized: set[tuple[str, str]] = set()
+        for kind, value in managed:
+            item = plugin_by_path.get(value) if kind == "path" else None
+            if item is not None:
+                normalized.add(("name", item.identity.lower()))
+            elif kind == "path" and (
+                identity := CodexAdapter._plugin_identity_from_path(value)
+            ):
+                normalized.add(("name", identity))
+            else:
+                normalized.add((kind, value))
+        return normalized
 
     def discover(self) -> list[Skill]:
         inventory = scan_roots(self.name, self._roots())
         text, parsed = self._load()
-        disabled_paths = {
-            path_key(entry["path"])
-            for entry in self._entries(parsed)
-            if entry.get("enabled") is False and isinstance(entry.get("path"), str)
-        }
-        disabled_names = {
-            entry["name"].lower()
-            for entry in self._entries(parsed)
-            if entry.get("enabled") is False and isinstance(entry.get("name"), str)
-        }
-        return [
+        del text
+        disabled = self._disabled_rules(parsed)
+        enabled_plugins = self._enabled_plugins(parsed)
+        inventory = [
             Skill(
                 **{
                     **asdict(item),
                     "state": "off"
-                    if item.key in disabled_paths or item.name.lower() in disabled_names
+                    if self._should_hide(item, disabled, enabled_plugins)
                     else "on",
+                    # Codex's current local config controls enablement, but it
+                    # does not expose a supported per-Skill proof that a host
+                    # omitted metadata from a model prompt.
+                    "context_visible": None,
                 }
             )
             for item in inventory
         ]
+        return sorted(inventory, key=lambda item: (item.group, item.name, item.key))
 
-    def _render(self, paths: set[str], inventory: list[Skill]) -> str:
+    def _render(
+        self, rules: set[tuple[str, str]], inventory: list[Skill]
+    ) -> str:
         by_key = {item.key: item.path for item in inventory}
+        by_name = {item.identity.lower(): item.identity for item in inventory}
         lines = [
             CODEX_BEGIN,
-            "# Managed by manage-agent-skills. Skill files remain installed.",
+            "# Managed by manage-agent-skills. Installed Skill files are never modified.",
             "",
         ]
-        for key in sorted(paths):
-            value = by_key.get(key, key)
-            if "'" in value:
-                raise SystemExit(f"Unsupported single quote in skill path: {value}")
+        for kind, key in sorted(rules):
+            value = by_name.get(key, key) if kind == "name" else by_key.get(key, key)
+            encoded = json.dumps(value, ensure_ascii=False) if any(c in value for c in "'\r\n") else f"'{value}'"
+            selector = "name" if kind == "name" else "path"
             lines.extend(
-                ["[[skills.config]]", f"path = '{value}'", "enabled = false", ""]
+                ["[[skills.config]]", f"{selector} = {encoded}", "enabled = false", ""]
             )
         lines.append(CODEX_END)
         return "\n".join(lines)
 
-    def _replace(self, text: str, paths: set[str], inventory: list[Skill]) -> str:
+    def _replace(
+        self,
+        text: str,
+        rules: set[tuple[str, str]],
+        inventory: list[Skill],
+    ) -> str:
         span = self._managed_span(text)
-        if not span and not paths:
+        if not span and not rules:
             return text
-        block = self._render(paths, inventory)
+        block = self._render(rules, inventory)
         if span:
             updated = text[: span[0]] + block + text[span[1] :]
         else:
@@ -422,23 +626,51 @@ class CodexAdapter:
             raise SystemExit(f"Generated invalid Codex TOML: {exc}") from exc
         return updated
 
+    def reconcile(self, dry_run: bool) -> dict[str, Any]:
+        text, parsed = self._load()
+        managed = self._managed_rules(text)
+        inventory = self.discover()
+        normalized = (
+            self._normalize_managed_rules(managed, inventory)
+            if self.selector == "name" else managed
+        )
+        migrated_rules = sum(
+            self.selector == "name" and kind == "path" and self._plugin_identity_from_path(value) is not None
+            for kind, value in managed
+        )
+        updated = self._replace(text, normalized, inventory)
+        changed = updated != text
+        backup = None
+        if changed and not dry_run:
+            backup = write_atomic(self.config, updated)
+            self._load()
+        return {
+            "platform": self.name,
+            "action": "reconcile",
+            "changed": changed,
+            "dry_run": dry_run,
+            "rules_migrated": migrated_rules,
+            "backup": str(backup) if backup else None,
+            "context_visibility": "unverified",
+            "note": "Codex does not provide a supported local proof that disabled metadata is absent from the model prompt; installed Skill files were not changed.",
+            "new_session_recommended": changed and not dry_run,
+        }
+
     def mutate(
         self, action: str, targets: list[Skill], dry_run: bool, force: bool
     ) -> dict[str, Any]:
         require_binary_action(self.name, action)
         text, parsed = self._load()
-        managed = self._managed_paths(text)
-        all_disabled_paths = {
-            path_key(entry["path"])
-            for entry in self._entries(parsed)
-            if entry.get("enabled") is False and isinstance(entry.get("path"), str)
+        managed = self._managed_rules(text)
+        span = self._managed_span(text)
+        outside = text[:span[0]] + text[span[1]:] if span else text
+        external = self._disabled_rules(tomllib.loads(outside))
+        target_rules = set().union(*(self._item_rules(item) for item in targets))
+        target_name_rules = {
+            ("name", item.identity.lower()) if self.selector == "name"
+            else ("path", item.key) for item in targets
+            if not self._item_rules(item) & external
         }
-        all_disabled_names = {
-            entry["name"].lower()
-            for entry in self._entries(parsed)
-            if entry.get("enabled") is False and isinstance(entry.get("name"), str)
-        }
-        external = all_disabled_paths - managed
         if action == "disable":
             protected = sorted(
                 {item.name for item in targets if item.name in PROTECTED_NAMES}
@@ -448,18 +680,14 @@ class CodexAdapter:
                     "Protected skills require --force: " + ", ".join(protected)
                 )
             desired = managed | {
-                item.key
-                for item in targets
-                if item.key not in external
-                and item.name.lower() not in all_disabled_names
+                rule for rule in target_name_rules if rule not in external
             }
         else:
             blocked = sorted(
                 {
                     item.name
                     for item in targets
-                    if item.key in external
-                    or item.name.lower() in all_disabled_names
+                    if self._item_rules(item) & external
                 }
             )
             if blocked:
@@ -467,7 +695,7 @@ class CodexAdapter:
                     "Skills disabled outside this manager's block were preserved: "
                     + ", ".join(blocked)
                 )
-            desired = managed - {item.key for item in targets}
+            desired = managed - target_rules
         updated = self._replace(text, desired, [*self.discover(), *targets])
         changed = updated != text
         backup = None
@@ -482,6 +710,9 @@ class CodexAdapter:
             "dry_run": dry_run,
             "config": str(self.config),
             "backup": str(backup) if backup else None,
+            "context_visibility": "unverified",
+            "selector_mode": self.selector,
+            "note": "Only Codex's documented configuration was changed; installed Skill files were not modified.",
             "new_session_recommended": changed and not dry_run,
         }
 
@@ -619,6 +850,10 @@ def parse_copilot_inventory(payload: Any) -> list[Skill]:
         name = item.get("name")
         kind = str(item.get("kind", item.get("type", ""))).lower()
         path = item.get("path", item.get("location", ""))
+        if not isinstance(path, str):
+            continue
+        if path and Path(path).is_dir():
+            path = str(Path(path) / "SKILL.md")
         if not isinstance(name, str):
             continue
         if kind and "skill" not in kind:
@@ -727,7 +962,7 @@ class CopilotAdapter:
     def _fallback(self) -> list[Skill]:
         roots = [
             (
-                Path.home() / ".copilot" / "skills",
+                self.home / "skills",
                 "copilot-user",
                 "user:copilot",
                 SKILL_GLOB_DEEP,
@@ -752,6 +987,7 @@ class CopilotAdapter:
                 capture_output=True,
                 text=True,
                 check=False,
+                timeout=20,
             )
             if result.returncode != 0:
                 inventory = self._fallback()
@@ -765,7 +1001,7 @@ class CopilotAdapter:
             Skill(
                 **{
                     **asdict(item),
-                    "state": "off" if item.name.lower() in disabled else "on",
+                    "state": "off" if item.name.lower() in disabled or item.state == "off" else "on",
                 }
             )
             for item in inventory
@@ -895,6 +1131,7 @@ class OpenClawAdapter:
             capture_output=True,
             text=True,
             check=False,
+            timeout=20,
         )
         if result.returncode != 0:
             return None
@@ -1040,25 +1277,30 @@ class OpenClawAdapter:
                     "use --dry-run to preview the native commands."
                 )
             if self.config.exists():
-                backup_path = self.config.with_name(
-                    self.config.name + ".manage-agent-skills.bak"
-                )
-                shutil.copy2(self.config, backup_path)
-                backup = backup_path
+                backup = backup_file(self.config)
+            completed = 0
             for command in commands:
-                result = subprocess.run(
-                    command,
-                    cwd=self.cwd,
-                    env=self._environment(),
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                )
-                if result.returncode != 0:
-                    message = result.stderr.strip() or result.stdout.strip()
-                    raise SystemExit(
-                        f"OpenClaw config command failed ({result.returncode}): {message}"
+                try:
+                    result = subprocess.run(
+                        command,
+                        cwd=self.cwd,
+                        env=self._environment(),
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=20,
                     )
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise SystemExit(
+                        f"OpenClaw execution interrupted after {completed} commands. "
+                        f"Current command outcome is unknown; inspect host state. Backup: {backup}"
+                    ) from exc
+                if result.returncode != 0:
+                    raise SystemExit(
+                        f"OpenClaw config command failed ({result.returncode}) after {completed} commands. "
+                        f"Partial changes may remain; inspect host state. Backup: {backup}"
+                    )
+                completed += 1
         return {
             "platform": self.name,
             "action": action,
@@ -1078,7 +1320,7 @@ def _load_yaml_module() -> Any:
         import yaml
     except ImportError as exc:
         raise SystemExit(
-            "Hermes support requires PyYAML. Install requirements.txt first."
+            "Skill metadata and Hermes support require PyYAML. Install requirements.txt first."
         ) from exc
     return yaml
 
@@ -1182,6 +1424,8 @@ class HermesAdapter:
     def discover(self) -> list[Skill]:
         settings = self._load()
         global_disabled, platform_disabled = self._disabled(settings, self.scope)
+        global_disabled.pop("hermes-agent", None)
+        platform_disabled.pop("hermes-agent", None)
         inventory = scan_roots(
             self.name,
             [
@@ -1210,6 +1454,8 @@ class HermesAdapter:
         self, action: str, targets: list[Skill], dry_run: bool, force: bool
     ) -> dict[str, Any]:
         require_binary_action(self.name, action)
+        if action == "disable" and any(item.identity == "hermes-agent" for item in targets):
+            raise SystemExit("Hermes essential skill hermes-agent cannot be disabled, including with --force.")
         if action == "disable":
             protected = sorted(
                 {item.name for item in targets if item.name in PROTECTED_NAMES}
@@ -1275,18 +1521,184 @@ class HermesAdapter:
         }
 
 
+class AntigravityAdapter:
+    """Antigravity / agy CLI: toggle by parking skill directories.
+
+    Active global skills live in ``<config>/skills/<dir>/SKILL.md``.
+    Disabled skills are moved unchanged to
+    ``<config>/skills_disabled/<dir>/``. Only direct children of those two
+    roots are ever moved, a move never overwrites an existing directory, and
+    file contents are never touched.
+    """
+
+    name = "antigravity"
+
+    def __init__(self, cwd: Path, config: Path | None = None, surface: str = "app") -> None:
+        self.cwd = cwd
+        self.surface = surface
+        configured = os.environ.get("ANTIGRAVITY_CONFIG_HOME")
+        self.config = (
+            config
+            or (Path(configured) if configured else None)
+            or Path.home() / ".gemini" / ("antigravity-cli" if surface == "cli" else "config")
+        ).expanduser().absolute()
+        self.active_root = self.config / ANTIGRAVITY_ACTIVE_DIR
+        self.disabled_root = self.config / ANTIGRAVITY_DISABLED_DIR
+
+    def available(self) -> tuple[bool, str]:
+        return self.active_root.is_dir() or self.disabled_root.is_dir(), str(
+            self.active_root
+        )
+
+    def _entries(self, root: Path, state: str) -> list[Skill]:
+        result: list[Skill] = []
+        if not root.is_dir():
+            return result
+        for directory in sorted(root.iterdir(), key=lambda item: item.name.lower()):
+            skill_file = directory / "SKILL.md"
+            if not directory.is_dir() or not skill_file.is_file():
+                continue
+            # Keep the unresolved entry path: a symlinked skill is parked by
+            # moving the link itself, never the tree it points at.
+            result.append(
+                Skill(
+                    platform=self.name,
+                    name=read_skill_name(skill_file),
+                    path=str(skill_file),
+                    group="antigravity-user",
+                    origin=f"user:antigravity:{state}",
+                    state=state,
+                    config_key=directory.name,
+                    # Workspace/plugin copies and active sessions are not
+                    # observable from this global directory alone.
+                    context_visible=None,
+                )
+            )
+        return result
+
+    def discover(self) -> list[Skill]:
+        active = self._entries(self.active_root, "on")
+        active_keys = {item.config_key.lower() for item in active}
+        parked = [
+            item
+            for item in self._entries(self.disabled_root, "off")
+            if item.config_key.lower() not in active_keys
+        ]
+        return sorted(active + parked, key=lambda item: (item.name, item.key))
+
+    def _managed_directory(self, item: Skill) -> Path:
+        directory = Path(item.path).parent
+        for root in (self.active_root, self.disabled_root):
+            if root.resolve().parent != self.config.resolve():
+                raise SystemExit(f"Refusing redirected skill root: {root}")
+        if path_key(directory.parent) not in {
+            path_key(self.active_root),
+            path_key(self.disabled_root),
+        }:
+            raise SystemExit(
+                f"Refusing to move {directory}: not a direct child of "
+                f"{self.active_root} or {self.disabled_root}."
+            )
+        return directory
+
+    def mutate(
+        self, action: str, targets: list[Skill], dry_run: bool, force: bool
+    ) -> dict[str, Any]:
+        require_binary_action(self.name, action)
+        if action == "disable":
+            protected = sorted(
+                {
+                    item.identity
+                    for item in targets
+                    if PROTECTED_NAMES & {item.identity, item.name}
+                }
+            )
+            if protected and not force:
+                raise SystemExit(
+                    "Protected skills require --force: " + ", ".join(protected)
+                )
+        source_root, destination_root, wanted_state = (
+            (self.active_root, self.disabled_root, "on")
+            if action == "disable"
+            else (self.disabled_root, self.active_root, "off")
+        )
+        moves: list[dict[str, str]] = []
+        conflicts: list[dict[str, str]] = []
+        unchanged: list[str] = []
+        for item in sorted(targets, key=lambda value: value.identity.lower()):
+            if not item.path or item.state != wanted_state:
+                unchanged.append(item.identity)
+                continue
+            directory = self._managed_directory(item)
+            if path_key(directory.parent) != path_key(source_root):
+                unchanged.append(item.identity)
+                continue
+            destination = destination_root / directory.name
+            if destination.exists() or destination.is_symlink():
+                conflicts.append({"skill": item.identity, "existing": str(destination)})
+                continue
+            moves.append({"skill": item.identity, "from": str(directory), "to": str(destination)})
+        if conflicts:
+            raise SystemExit(
+                "Refusing to overwrite existing skill directories: "
+                + ", ".join(f"{row['skill']} -> {row['existing']}" for row in conflicts)
+            )
+        if moves and not dry_run:
+            destination_root.mkdir(parents=True, exist_ok=True)
+            done: list[dict[str, str]] = []
+            try:
+                for move in moves:
+                    os.rename(move["from"], move["to"])
+                    done.append(move)
+            except OSError as exc:
+                # Put back what already moved so a failure never leaves the
+                # host with half of a requested change.
+                rollback_failed = []
+                for move in reversed(done):
+                    try:
+                        if Path(move["from"]).exists() or Path(move["from"]).is_symlink():
+                            raise OSError("Original location is occupied")
+                        os.rename(move["to"], move["from"])
+                    except OSError:
+                        rollback_failed.append(move)
+                if rollback_failed:
+                    raise SystemExit(
+                        "Move failed; rollback incomplete. Recover these paths manually: "
+                        + json.dumps(rollback_failed) + f". Cause: {exc}"
+                    ) from exc
+                raise SystemExit(
+                    f"Move failed and was rolled back: {exc}"
+                ) from exc
+        return {
+            "platform": self.name,
+            "action": action,
+            "targets": sorted({item.identity for item in targets}),
+            "changed": bool(moves),
+            "dry_run": dry_run,
+            "moves": moves,
+            "unchanged": sorted(unchanged),
+            "active_root": str(self.active_root),
+            "disabled_root": str(self.disabled_root),
+            "surface": self.surface,
+            "context_visibility": "unverified",
+            "new_session_recommended": bool(moves) and not dry_run,
+        }
+
+
 def adapters(args: argparse.Namespace) -> list[Any]:
     selected = PLATFORMS if args.platform == "all" else (args.platform,)
     result: list[Any] = []
     for name in selected:
         if name == "codex":
-            result.append(CodexAdapter(args.cwd, args.codex_config))
+            result.append(CodexAdapter(args.cwd, args.codex_config, args.codex_selector))
         elif name == "claude":
             result.append(ClaudeAdapter(args.cwd, args.claude_config))
         elif name == "copilot":
             result.append(CopilotAdapter(args.cwd, args.copilot_config))
         elif name == "openclaw":
             result.append(OpenClawAdapter(args.cwd, args.openclaw_config))
+        elif name == "antigravity":
+            result.append(AntigravityAdapter(args.cwd, args.antigravity_config, args.antigravity_surface))
         else:
             result.append(
                 HermesAdapter(args.cwd, args.hermes_config, args.hermes_scope)
@@ -1300,21 +1712,118 @@ def status_payload(
     platforms: list[dict[str, Any]] = []
     for adapter in selected:
         available, detail = adapter.available()
-        inventory = apply_group_rules(adapter.discover(), rules or {})
+        error = None
+        try:
+            inventory = apply_group_rules(adapter.discover(), rules or {})
+        except (SystemExit, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            # Do not serialize parser exceptions: YAML diagnostics can contain secrets.
+            error = f"{type(exc).__name__}: configuration or discovery failed; inspect this platform locally"
+            inventory = []
         counts = {
             state: sum(item.state == state for item in inventory)
             for state in STATES
+        }
+        context_counts = {
+            "context_visible": sum(item.context_visible is True for item in inventory),
+            "context_hidden": sum(item.context_visible is False for item in inventory),
+            "context_unverified": sum(item.context_visible is None for item in inventory),
+            "context_drift": sum(
+                item.state == "off" and item.context_visible is True
+                for item in inventory
+            ),
         }
         platforms.append(
             {
                 "platform": adapter.name,
                 "available": available,
+                "error": error,
+                "state_scope": "adapter configuration; not a live host session",
                 "detail": detail,
                 "discovered": len(inventory),
                 **counts,
+                **context_counts,
             }
         )
     return {"platforms": platforms}
+
+
+def audit_payload(
+    selected: list[Any], rules: dict[str, list[str]] | None = None
+) -> dict[str, Any]:
+    """Configuration/metadata evidence only; no host prompt or token-cost claims."""
+    findings: list[dict[str, Any]] = []
+    inventories: list[dict[str, Any]] = []
+
+    def add(platform: str, severity: str, code: str, detail: str, path: str = "") -> None:
+        findings.append(dict(platform=platform, severity=severity, code=code, detail=detail, path=path))
+
+    for adapter in selected:
+        try:
+            inventory = apply_group_rules(adapter.discover(), rules or {})
+        except (SystemExit, OSError, ValueError, subprocess.TimeoutExpired):
+            add(adapter.name, "error", "discovery_failed", "Inspect platform configuration locally; raw config is not included.")
+            continue
+        inventories.extend(asdict(item) for item in inventory)
+        identities: dict[str, list[str]] = {}
+        for item in inventory:
+            identities.setdefault(item.identity, []).append(item.path)
+            if item.state == "unknown":
+                add(adapter.name, "warning", "unknown_state", item.identity, item.path)
+            if not item.path:
+                continue
+            try:
+                metadata = read_frontmatter(Path(item.path))
+            except ValueError as exc:
+                add(adapter.name, "warning", str(exc), item.identity, item.path)
+                continue
+            name = metadata.get("name")
+            if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name) or len(name) > 64:
+                add(adapter.name, "warning", "nonportable_name", "Host may accept this name, but the portable specification does not.", item.path)
+            elif name != Path(item.path).parent.name:
+                add(adapter.name, "warning", "directory_name_mismatch", "Frontmatter name differs from its directory.", item.path)
+            description = metadata.get("description")
+            if not isinstance(description, str) or not description.strip() or len(description) > 1024:
+                add(adapter.name, "warning", "invalid_description", "Expected a nonempty description of at most 1024 characters.", item.path)
+            if metadata.get("disable-model-invocation") is True or metadata.get("user-invocable") is False:
+                add(adapter.name, "info", "frontmatter_invocation_policy", "Host-specific invocation flags also influence visibility.", item.path)
+        for identity, paths in identities.items():
+            if len(paths) > 1:
+                add(adapter.name, "warning", "duplicate_identity", f"{identity}: {len(paths)} discovered locations; host precedence is not inferred.")
+        if adapter.name == "codex":
+            text, config = adapter._load()
+            try:
+                adapter._managed_rules(text)
+            except (SystemExit, ValueError):
+                add(adapter.name, "error", "invalid_managed_block", "Manager-owned rules require inspection; no changes made.")
+            for rule in adapter._entries(config):
+                path = rule.get("path")
+                if isinstance(path, str) and not Path(path).expanduser().exists():
+                    add(adapter.name, "warning", "stale_rule_path", "Configured path is absent; re-scan after installation or plugin changes.", path)
+            if any("name" in rule for rule in adapter._entries(config)):
+                add(adapter.name, "warning", "name_rule_host_dependent", "Public Codex docs specify path rules. Verify name rules against your exact host build.")
+            add(adapter.name, "info", "plugin_cache_not_registry", "Cache discovery may include stale versions; plugin activation and prompt metadata require host evidence.")
+        if adapter.name in {"claude", "copilot"}:
+            folder = ".claude" if adapter.name == "claude" else ".copilot"
+            for parent in (adapter.cwd.resolve(), *adapter.cwd.resolve().parents):
+                for filename in ("settings.json", "settings.local.json"):
+                    path = parent / folder / filename
+                    if path.is_file() and path.resolve() != adapter.config.resolve():
+                        add(adapter.name, "warning", "additional_config_layer", "This configuration may change effective host state; this adapter writes only its selected config.", str(path))
+                if (parent / ".git").exists():
+                    break
+        if adapter.name == "antigravity":
+            add(adapter.name, "warning", "parking_scope_only", "Only the selected global root is managed. Workspace/plugin copies may remain available; prompt visibility is unverified.")
+            active = {item.config_key for item in adapter._entries(adapter.active_root, "on")}
+            parked = {item.config_key for item in adapter._entries(adapter.disabled_root, "off")}
+            for identity in sorted(active & parked):
+                add(adapter.name, "warning", "parking_collision", f"{identity} exists in both active and parked roots.")
+    return {
+        "schema_version": 1,
+        "evidence_scope": "local configuration and installed metadata; no live prompt verification",
+        "findings": findings,
+        "skills": inventories,
+        "summary": {level: sum(item["severity"] == level for item in findings) for level in ("error", "warning", "info")},
+    }
 
 
 def load_preset(path: Path, name: str, platform: str) -> dict[str, list[str]]:
@@ -1324,7 +1833,7 @@ def load_preset(path: Path, name: str, platform: str) -> dict[str, list[str]]:
         raise SystemExit(f"Preset file not found: {path}") from exc
     except json.JSONDecodeError as exc:
         raise SystemExit(f"Invalid preset JSON: {exc}") from exc
-    if document.get("version") != 1:
+    if not isinstance(document, dict) or document.get("version") != 1:
         raise SystemExit("Preset file version must be 1.")
     try:
         value = document["presets"][name][platform]
@@ -1332,6 +1841,8 @@ def load_preset(path: Path, name: str, platform: str) -> dict[str, list[str]]:
         raise SystemExit(f"Preset {name!r} has no {platform!r} configuration.") from exc
     if not isinstance(value, dict):
         raise SystemExit("Platform preset must be an object.")
+    if set(value) - {"disable", "enable"}:
+        raise SystemExit("Unknown preset action; supported actions are disable and enable.")
     result: dict[str, list[str]] = {}
     for action in ("disable", "enable"):
         selectors = value.get(action, [])
@@ -1347,15 +1858,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Audit and toggle installed Agent Skills without deleting files."
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument(
         "--platform", choices=("all", *PLATFORMS), default="all"
     )
     parser.add_argument("--cwd", type=Path, default=Path.cwd())
     parser.add_argument("--codex-config", type=Path)
+    parser.add_argument("--codex-selector", choices=("path", "name"), default="path",
+                        help="Use documented paths (default); name requires host-specific verification.")
     parser.add_argument("--claude-config", type=Path)
     parser.add_argument("--copilot-config", type=Path)
     parser.add_argument("--openclaw-config", type=Path)
     parser.add_argument("--hermes-config", type=Path)
+    parser.add_argument(
+        "--antigravity-surface", choices=("app", "cli"), default="app",
+        help="App/IDE global root or current agy CLI global root.",
+    )
+    parser.add_argument(
+        "--antigravity-config",
+        type=Path,
+        help="Antigravity config directory holding skills/ (default ~/.gemini/config).",
+    )
     parser.add_argument(
         "--groups",
         type=Path,
@@ -1368,6 +1891,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     json_help = "Emit machine-readable JSON; accepted before or after the command."
     parser.add_argument("--json", action="store_true", help=json_help)
+    parser.add_argument("--allow-undiscovered", action="store_true",
+                        help="Allow literal unknown names for Copilot/OpenClaw/Hermes; no fuzzy matching.")
 
     def add_command_json(command: argparse.ArgumentParser) -> None:
         command.add_argument(
@@ -1382,9 +1907,18 @@ def build_parser() -> argparse.ArgumentParser:
     add_command_json(doctor)
     status = subparsers.add_parser("status")
     add_command_json(status)
+    audit = subparsers.add_parser("audit", help="Read-only metadata and compatibility diagnostics.")
+    audit.add_argument("--strict", action="store_true", help="Return 1 on warnings as well as errors.")
+    add_command_json(audit)
     search = subparsers.add_parser("search")
     search.add_argument("query")
     add_command_json(search)
+    reconcile = subparsers.add_parser(
+        "reconcile",
+        help="Normalize Codex Skill configuration without modifying installed files.",
+    )
+    reconcile.add_argument("--dry-run", action="store_true")
+    add_command_json(reconcile)
     for action in ("enable", "disable"):
         mutation = subparsers.add_parser(action)
         mutation.add_argument("selectors", nargs="+")
@@ -1417,8 +1951,19 @@ def emit(value: Any, as_json: bool) -> None:
             counts = " ".join(f"{state}={row[state]:3}" for state in STATES)
             print(
                 f"{row['platform']:8} available={str(row['available']).lower():5} "
-                f"discovered={row['discovered']:3} {counts} {row['detail']}"
+                f"discovered={row['discovered']:3} {counts} "
+                f"context-visible={row['context_visible']:3} "
+                f"context-hidden={row['context_hidden']:3} "
+                f"context-unverified={row['context_unverified']:3} "
+                f"context-drift={row['context_drift']:3} {row['detail']}"
             )
+            if row.get("error"):
+                print(f"  error={row['error']}")
+        return
+    if isinstance(value, dict) and "findings" in value:
+        for row in value["findings"]:
+            print(f"{row['platform']:12} {row['severity']:7} {row['code']}: {row['detail']} {row['path']}")
+        print(f"summary={value['summary']}")
         return
     if isinstance(value, list):
         for row in value:
@@ -1444,8 +1989,13 @@ def main() -> int:
     selected = adapters(args)
     rules = load_group_rules(args.groups)
     if args.command in {"doctor", "status"}:
-        emit(status_payload(selected, rules), args.json)
-        return 0
+        payload = status_payload(selected, rules)
+        emit(payload, args.json)
+        return int(any(row["error"] for row in payload["platforms"]))
+    if args.command == "audit":
+        payload = audit_payload(selected, rules)
+        emit(payload, args.json)
+        return int(any(row["severity"] == "error" or (args.strict and row["severity"] == "warning") for row in payload["findings"]))
     if args.command == "search":
         query = args.query.lower()
         rows = [
@@ -1462,6 +2012,11 @@ def main() -> int:
     if args.platform == "all":
         raise SystemExit("Mutations require an explicit --platform.")
     adapter = selected[0]
+    if args.command == "reconcile":
+        if args.platform != "codex":
+            raise SystemExit("reconcile is currently supported only for Codex.")
+        emit(adapter.reconcile(args.dry_run), args.json)
+        return 0
     inventory = apply_group_rules(adapter.discover(), rules)
     if args.command == "preset":
         preset = load_preset(args.file, args.name, args.platform)
@@ -1471,6 +2026,15 @@ def main() -> int:
             else []
             for action in ("disable", "enable")
         }
+        # Enables win without transiently disabling the same host identity.
+        def mutation_key(item: Skill) -> str:
+            return item.key if args.platform == "codex" and args.codex_selector == "path" else item.identity
+        enabled_ids = {mutation_key(item) for item in resolved["enable"]}
+        resolved["disable"] = [item for item in resolved["disable"] if mutation_key(item) not in enabled_ids]
+        # Validate every operation before the first side effect.
+        for action in ("disable", "enable"):
+            if resolved[action]:
+                adapter.mutate(action, resolved[action], True, args.force)
         results = []
         for action in ("disable", "enable"):
             if not resolved[action]:
@@ -1484,7 +2048,7 @@ def main() -> int:
     try:
         targets = resolve_selectors(args.selectors, inventory)
     except SystemExit:
-        if args.platform not in {"copilot", "openclaw", "hermes"} or any(
+        if not args.allow_undiscovered or args.platform not in {"copilot", "openclaw", "hermes"} or any(
             value.lower() == "all"
             or value.lower().startswith(("group:", "path:"))
             for value in args.selectors

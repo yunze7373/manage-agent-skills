@@ -4,8 +4,11 @@
 
 ### One safe switchboard for Agent Skills across coding agents
 
-Discover, audit, enable, disable, and preset installed skills without deleting
-their files — and without running a daemon.
+Discover, audit, enable, disable, and preset installed skills without deleting,
+renaming, or editing their files — and without running a daemon. On Codex, the
+manager reports when host prompt metadata cannot be verified locally.
+Antigravity has no native skill switch, so it is the one documented exception:
+disabled skill directories are parked, unchanged, in `skills_disabled/`.
 
 Built by [Han (@yunze7373)](https://github.com/yunze7373) ·
 [Yonro Co., Ltd.](https://yonro.co.jp)
@@ -13,7 +16,7 @@ Built by [Han (@yunze7373)](https://github.com/yunze7373) ·
 [![CI](https://github.com/yunze7373/manage-agent-skills/actions/workflows/ci.yml/badge.svg)](https://github.com/yunze7373/manage-agent-skills/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/Agent%20Skills-compatible-111827)](https://agentskills.io/)
-[![Hosts](https://img.shields.io/badge/hosts-5-8B5CF6)](#host-platform-support)
+[![Hosts](https://img.shields.io/badge/hosts-6-8B5CF6)](#host-platform-support)
 [![OS](https://img.shields.io/badge/OS-Windows%20%7C%20macOS%20%7C%20Linux-2563EB)](#operating-system-support)
 [![No daemon](https://img.shields.io/badge/daemon-none-10B981)](#safety-by-design)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -38,7 +41,7 @@ from different locations and exposes a different visibility mechanism.
 Manage Agent Skills provides one CLI and one reusable Agent Skill over a set of
 host-specific adapters:
 
-- files stay installed and updateable;
+- files stay installed, unmodified, and updateable;
 - unused skills can be removed from a host's active catalog;
 - newly installed skills appear on the next invocation;
 - every mutation can be previewed with `--dry-run`;
@@ -46,7 +49,10 @@ host-specific adapters:
 
 > [!IMPORTANT]
 > This project is intentionally on-demand. It does not start a background
-> service, watch skill directories, or move/delete installed skills.
+> service, watch skill directories, or move/delete installed skills. The single
+> exception is the Antigravity adapter, which moves whole skill directories
+> between `skills/` and `skills_disabled/` because the host offers no other
+> control; it never deletes, overwrites, or edits them.
 
 ## Operating system support
 
@@ -73,11 +79,11 @@ into another operating system's path syntax.
 | GitHub Copilot CLI | Native inventory with filesystem fallback | `disabledSkills` | ✅ |
 | OpenClaw | Native inventory with workspace/user fallback | `skills.entries.<key>.enabled` through the native CLI | ✅ |
 | Hermes Agent | `$HERMES_HOME/skills` | Global or per-platform disable lists | ✅ |
-| Claude Desktop / Cowork | Account-synced, no local config | — | ❌ by design |
+| Antigravity App/IDE or CLI | Surface-specific global root | Manager-owned directory parking | Scoped |
+| Claude Desktop / Cowork | Outside local adapter scope | Host UI | Not implemented |
 
-Claude Desktop and Cowork enable skills per claude.ai account and sync them at
-session start, so no local adapter can toggle them. Manage those from
-Customize > Skills in the app.
+Claude Desktop and Cowork are outside this manager's local adapter scope.
+Manage those skill pools in the host UI.
 
 Detailed semantics and primary references live in
 [platforms.md](skills/manage-agent-skills/references/platforms.md).
@@ -131,6 +137,8 @@ directory into a skill root supported by your agent:
 | Codex / Copilot CLI / OpenClaw | `~/.agents/skills` |
 | Claude Code | `~/.claude/skills` |
 | Hermes Agent | `$HERMES_HOME/skills` |
+| Antigravity App/IDE | `~/.gemini/config/skills` |
+| Antigravity CLI | `~/.gemini/antigravity-cli/skills` |
 
 Keeping a symbolic link to the clone makes future updates immediate. You can
 also run the Python CLI directly without installing the Agent Skill.
@@ -140,9 +148,11 @@ also run the Python CLI directly without installing the Agent Skill.
 ```text
 doctor
 status
+audit [--strict]                # Read-only metadata and compatibility findings
 search QUERY
 enable SELECTOR...
 disable SELECTOR...
+reconcile                         # Codex: normalize stable configuration rules
 set STATE SELECTOR...          # Claude Code only
 preset NAME --file FILE
 ```
@@ -156,6 +166,23 @@ output. Both forms are equivalent:
 python <skillctl> --platform all --json status
 python <skillctl> --platform all status --json
 ```
+
+### Audit and compatibility
+
+```text
+python <skillctl> --platform all audit --json
+python <skillctl> --platform codex audit --strict
+```
+
+Audits report malformed metadata, duplicate identities, unresolved state,
+additional configuration layers and host limitations. They never claim actual
+model token savings. `status` and `doctor` isolate adapter failures and return
+nonzero if discovery is incomplete. Unknown mutation names fail unless the
+caller explicitly uses `--allow-undiscovered` on Copilot/OpenClaw/Hermes.
+
+Read [audit and recovery](skills/manage-agent-skills/references/auditing.md) for
+exit codes and recovery boundaries, and the
+[2026-10-21 upgrade report](docs/audit-2026-10-21.md) for findings and validation.
 
 ### Selectors
 
@@ -216,7 +243,20 @@ bulk disable operations unless `--force` is explicitly supplied.
 ```powershell
 python $skillctl --platform codex status
 python $skillctl --platform codex disable group:azure --dry-run
+python $skillctl --platform codex reconcile --dry-run
+python $skillctl --platform codex reconcile
 ```
+
+Codex defaults to documented path-based `skills.config` rules and leaves skill
+files untouched. Existing name rules are preserved. Use `--codex-selector name`
+only after verifying that the exact host build supports that contract. In this
+explicit mode, `reconcile` can migrate old plugin paths into stable names;
+default reconciliation preserves paths. Re-scan after plugin updates because
+path rules can reference obsolete versions.
+
+`status` reports metadata context as `context-unverified`. Plugin cache and
+selected configuration do not prove the host's actual prompt contents. Run
+`audit` to find duplicate identities, host-dependent rules and other limitations.
 
 ### Claude Code
 
@@ -281,6 +321,25 @@ python $skillctl --platform hermes --hermes-scope telegram disable shell-tools -
 
 Hermes global disables take precedence over platform-specific state.
 
+### Antigravity / agy CLI
+
+```powershell
+python $skillctl --platform antigravity status
+python $skillctl --platform antigravity disable bigquery-sql gcp-spark --dry-run
+python $skillctl --platform antigravity enable gcp-spark
+```
+
+The default `--antigravity-surface app` manages `~/.gemini/config/skills`.
+Use `--antigravity-surface cli` for the current CLI's
+`~/.gemini/antigravity-cli/skills`. `--antigravity-config` or
+`ANTIGRAVITY_CONFIG_HOME` overrides either selection for known custom/legacy roots.
+
+`disable` parks the whole directory under sibling `skills_disabled`; `enable`
+restores it. The preview reports exact moves. Collisions and redirected roots
+are refused. Failed batches attempt rollback and report incomplete recovery.
+Workspace and plugin copies remain outside scope, so location is not proof
+of prompt visibility. Gemini CLI is a separate host, not this adapter.
+
 ## Presets
 
 Presets make repeatable profiles such as `lean`, `coding`, or `research`
@@ -290,8 +349,8 @@ portable:
 python $skillctl --platform codex preset lean --file skill-presets.example.json --dry-run
 ```
 
-The format supports per-platform `disable` and `enable` selectors. Disable
-runs first, so an explicit enable wins. See
+The format supports per-platform `disable` and `enable` selectors. Explicit enables win without a transient disable. All actions are preflighted
+before writes; runtime failures can still leave partial changes. See
 [presets.md](skills/manage-agent-skills/references/presets.md).
 
 ## How it works
@@ -306,7 +365,8 @@ flowchart LR
     A --> CP["Copilot JSONC"]
     A --> OC["OpenClaw native CLI"]
     A --> HE["Hermes YAML"]
-    CX & CL & CP & OC & HE --> R["Status + backup + restart guidance"]
+    A --> AG["Antigravity directory parking"]
+    CX & CL & CP & OC & HE & AG --> R["Status + backup + restart guidance"]
 ```
 
 The portable interface is shared; discovery and mutation remain host-specific.
@@ -315,12 +375,14 @@ identical lifecycle semantics.
 
 ## Safety by design
 
-- **Non-destructive:** no installed skill directory or `SKILL.md` is deleted.
+- **Non-destructive:** no installed skill directory or `SKILL.md` is deleted or
+  edited; Antigravity alone moves whole directories between managed roots.
 - **On-demand:** no daemon, scheduled task, or manager-owned watcher.
 - **Previewable:** every mutation supports `--dry-run`.
 - **Scoped:** mutations require one explicit platform.
 - **Recoverable:** file-backed configuration gets a sibling
-  `.manage-agent-skills.bak` before modification.
+  `.manage-agent-skills.bak` before modification, with unique suffixes on later
+  backups so earlier recovery copies survive.
 - **Atomic where owned:** direct config writes use an atomic replacement.
 - **Native where safer:** OpenClaw configuration changes use its own CLI.
 - **Conservative:** malformed configuration causes a refusal instead of a
@@ -332,11 +394,11 @@ third-party skills.
 ## Requirements
 
 - Python 3.11 or newer
-- PyYAML 6.0 or newer for the Hermes adapter
+- PyYAML 6.0 or newer for bounded YAML metadata parsing and Hermes configuration
 - The relevant host CLI/configuration for the platform being managed
 
-Codex, Claude Code, Copilot CLI, and OpenClaw fallback discovery use only the
-Python standard library.
+Metadata parsing uses PyYAML safe loading; skill instructions and scripts are
+never executed during inventory or audit.
 
 ## Development
 
@@ -357,20 +419,21 @@ The CI workflow runs the test suite on Linux, Windows, and macOS.
 
 ## Contributing
 
-Issues and pull requests are welcome once the repository is published. New
+Issues and pull requests are welcome. New
 adapters must:
 
 1. document the host's current primary source;
 2. implement discovery and `--dry-run` before mutation;
 3. preserve unrelated configuration and create recoverable backups;
-4. avoid deleting or relocating installed skills;
+4. avoid deleting installed skills and explicitly document any scoped relocation;
 5. include isolated tests that never touch real user settings.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full checklist.
 
 ## Project status
 
-The project is pre-release. The public API, preset schema, and supported host
+The current version is **v0.2.0**. Check the CLI with `python <skillctl> --version`.
+The project is pre-1.0. The public API, preset schema, and supported host
 versions may evolve before `v1.0.0`.
 
 ## License
