@@ -405,7 +405,7 @@ never executed during inventory or audit.
 ```text
 python -m pip install -r requirements.txt
 python -m unittest discover -s tests -v
-python -m py_compile skills/manage-agent-skills/scripts/skillctl.py
+python -m py_compile skills/manage-agent-skills/scripts/skillctl.py scripts/release.py
 ```
 
 Validate the packaged skill when the OpenAI skill-creator utilities are
@@ -416,6 +416,39 @@ python <path-to-skill-creator>/scripts/quick_validate.py skills/manage-agent-ski
 ```
 
 The CI workflow runs the test suite on Linux, Windows, and macOS.
+
+## Releases
+
+A pushed stable tag (`vMAJOR.MINOR.PATCH`) runs the release workflow. It checks
+that the tag, `SKILL.md` metadata and CLI version agree, runs the existing
+cross-platform manager tests, then creates a GitHub Release with a deterministic
+ZIP and `SHA256SUMS`. The ZIP contains the installable skill, its license, and
+its Python dependency file.
+
+ClawHub publishing is enabled by setting the repository Actions variable
+`PUBLISH_TO_CLAWHUB` to `true` and adding a `CLAWHUB_TOKEN` Actions secret. The
+workflow publishes the matching semantic version with the fixed slug and
+display name, links it to the tagged source commit, and runs a dry-run first.
+Retries skip an already-published version only when its owner, display name,
+file list, and SHA-256 hashes match. If a version is missing from public
+endpoints but already has a ClawHub scan report, the workflow stops for review
+instead of re-uploading a hidden or pending submission. It verifies the exact
+public version and file hashes before the channel job succeeds.
+
+SkillHub publishing can be enabled separately with the `PUBLISH_TO_SKILLHUB`
+Actions variable set to `true`, a `SKILLHUB_TOKEN` Actions secret, and the
+publisher namespace in the `SKILLHUB_NAMESPACE` Actions variable. It previews
+the package before publishing publicly. Retries download the exact published
+version and compare every file hash before skipping; a conflict or pending
+review stops that channel. Each registry remains an independent job, so an
+unavailable registry does not remove the GitHub release or publish to another
+registry.
+
+For a new version, update both `metadata.version` in
+`skills/manage-agent-skills/SKILL.md` and `VERSION` in `skillctl.py`, merge the
+change, then push its matching tag. The workflow applies to newly pushed tags;
+it does not back-publish existing releases. This project is not an npm package,
+so npm publishing is not part of the release pipeline.
 
 ## Contributing
 

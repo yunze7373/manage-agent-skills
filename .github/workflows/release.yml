@@ -1,0 +1,239 @@
+name: Release and publish skill
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.11"]
+        include:
+          - os: ubuntu-latest
+            python-version: "3.12"
+          - os: ubuntu-latest
+            python-version: "3.13"
+          - os: ubuntu-latest
+            python-version: "3.14"
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Check dependency consistency
+        run: python -m pip check
+
+      - name: Compile CLI and release helper
+        run: python -m py_compile skills/manage-agent-skills/scripts/skillctl.py scripts/release.py
+
+      - name: Run manager tests
+        run: python -m unittest discover -s tests -v
+
+  release:
+    name: Validate and create GitHub Release
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag still points to this event commit
+        shell: bash
+        run: |
+          test "$(git rev-parse "${GITHUB_REF_NAME}^{commit}")" = "$(git rev-parse "$GITHUB_SHA^{commit}")"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install release metadata parser
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Compile release helper
+        run: python -m py_compile skills/manage-agent-skills/scripts/skillctl.py scripts/release.py
+
+      - name: Check release version
+        run: python scripts/release.py verify "$GITHUB_REF_NAME"
+
+      - name: Build deterministic release assets
+        run: python scripts/release.py package "$GITHUB_REF_NAME" --output-dir "$RUNNER_TEMP/release"
+
+      - name: Create GitHub Release without replacing published assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="$GITHUB_REF_NAME"
+          assets="$RUNNER_TEMP/release"
+          if ! gh release view "$tag" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/release-assets.txt" 2>/dev/null; then
+            gh release create "$tag" --verify-tag --generate-notes
+            : > "$RUNNER_TEMP/release-assets.txt"
+          fi
+          for asset in "$assets/manage-agent-skills-$tag.zip" "$assets/SHA256SUMS"; do
+            name="$(basename "$asset")"
+            if ! grep -Fqx "$name" "$RUNNER_TEMP/release-assets.txt"; then
+              gh release upload "$tag" "$asset"
+            fi
+          done
+
+  clawhub:
+    name: Publish to ClawHub
+    needs: release
+    if: ${{ vars.PUBLISH_TO_CLAWHUB == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js for ClawHub CLI
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install pinned ClawHub CLI
+        run: npm install --global clawhub@0.23.3
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install metadata parser
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Verify publishing credentials
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+        run: test -n "$CLAWHUB_TOKEN"
+
+      - name: Authenticate ClawHub CLI
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+          CLAWHUB_CONFIG_PATH: ${{ runner.temp }}/clawhub-config.json
+        run: clawhub login --token "$CLAWHUB_TOKEN"
+
+      - name: Check version and existing ClawHub release
+        id: preflight
+        env:
+          CLAWHUB_CONFIG_PATH: ${{ runner.temp }}/clawhub-config.json
+        run: python scripts/release.py clawhub-check "$GITHUB_REF_NAME" --github-output "$GITHUB_OUTPUT"
+
+      - name: Preview ClawHub package
+        if: ${{ steps.preflight.outputs.action == 'publish' }}
+        env:
+          CLAWHUB_CONFIG_PATH: ${{ runner.temp }}/clawhub-config.json
+        run: |
+          clawhub skill publish skills/manage-agent-skills \
+            --slug manage-agent-skills \
+            --name "Manage Agent Skills" \
+            --owner yunze7373 \
+            --version "${GITHUB_REF_NAME#v}" \
+            --source-repo "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --source-ref "$GITHUB_REF_NAME" \
+            --source-path skills/manage-agent-skills \
+            --changelog "See the GitHub release for $GITHUB_REF_NAME." \
+            --dry-run
+
+      - name: Publish exact ClawHub version
+        if: ${{ steps.preflight.outputs.action == 'publish' }}
+        env:
+          CLAWHUB_CONFIG_PATH: ${{ runner.temp }}/clawhub-config.json
+        run: |
+          clawhub skill publish skills/manage-agent-skills \
+            --slug manage-agent-skills \
+            --name "Manage Agent Skills" \
+            --owner yunze7373 \
+            --version "${GITHUB_REF_NAME#v}" \
+            --source-repo "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --source-ref "$GITHUB_REF_NAME" \
+            --source-path skills/manage-agent-skills \
+            --changelog "See the GitHub release for $GITHUB_REF_NAME."
+
+      - name: Verify published ClawHub files
+        env:
+          CLAWHUB_CONFIG_PATH: ${{ runner.temp }}/clawhub-config.json
+        run: python scripts/release.py clawhub-verify "$GITHUB_REF_NAME"
+
+  skillhub:
+    name: Publish to SkillHub
+    needs: release
+    if: ${{ vars.PUBLISH_TO_SKILLHUB == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install metadata parser
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Verify SkillHub namespace configuration
+        env:
+          SKILLHUB_NAMESPACE: ${{ vars.SKILLHUB_NAMESPACE }}
+        run: test -n "$SKILLHUB_NAMESPACE"
+
+      - name: Check existing SkillHub version
+        id: preflight
+        env:
+          SKILLHUB_NAMESPACE: ${{ vars.SKILLHUB_NAMESPACE }}
+          SKILLHUB_TOKEN: ${{ secrets.SKILLHUB_TOKEN }}
+        run: python scripts/release.py skillhub-check "$GITHUB_REF_NAME" --namespace "$SKILLHUB_NAMESPACE" --github-output "$GITHUB_OUTPUT"
+
+      - name: Verify SkillHub publishing credentials
+        if: ${{ steps.preflight.outputs.action == 'publish' }}
+        env:
+          SKILLHUB_TOKEN: ${{ secrets.SKILLHUB_TOKEN }}
+        run: test -n "$SKILLHUB_TOKEN"
+
+      - name: Preview SkillHub package
+        if: ${{ steps.preflight.outputs.action == 'publish' }}
+        env:
+          SKILLHUB_TOKEN: ${{ secrets.SKILLHUB_TOKEN }}
+          SKILLHUB_NAMESPACE: ${{ vars.SKILLHUB_NAMESPACE }}
+        run: npx --yes @astron-team/skillhub@0.1.12 publish skills/manage-agent-skills --namespace "$SKILLHUB_NAMESPACE" --visibility public --registry https://skill.xfyun.cn --dry-run --json
+
+      - name: Publish to SkillHub
+        if: ${{ steps.preflight.outputs.action == 'publish' }}
+        env:
+          SKILLHUB_TOKEN: ${{ secrets.SKILLHUB_TOKEN }}
+          SKILLHUB_NAMESPACE: ${{ vars.SKILLHUB_NAMESPACE }}
+        run: npx --yes @astron-team/skillhub@0.1.12 publish skills/manage-agent-skills --namespace "$SKILLHUB_NAMESPACE" --visibility public --registry https://skill.xfyun.cn --json
+
+      - name: Verify published SkillHub files
+        env:
+          SKILLHUB_NAMESPACE: ${{ vars.SKILLHUB_NAMESPACE }}
+          SKILLHUB_TOKEN: ${{ secrets.SKILLHUB_TOKEN }}
+        run: python scripts/release.py skillhub-check "$GITHUB_REF_NAME" --namespace "$SKILLHUB_NAMESPACE"

@@ -2,7 +2,7 @@
 name: manage-agent-skills
 description: Audit installed Agent Skills and manage their host-specific visibility across Codex, Claude Code, Copilot CLI, OpenClaw, Hermes, and Antigravity. Use for skill inventory, duplicate or malformed metadata diagnosis, exact enable/disable changes, Claude visibility states, and reusable presets. Does not install skills or measure actual model token usage.
 metadata:
-  version: "0.2.0"
+  version: "0.2.1"
 ---
 
 # Manage Agent Skills
@@ -45,6 +45,17 @@ Unknown names fail by default. Only use `--allow-undiscovered` for an explicitly
 requested literal host key on Copilot/OpenClaw/Hermes; it is not typo correction.
 Groups normally identify discovery sources. A `--groups file.json` can define
 user taxonomy; never infer groups from skill names without that file.
+
+## Data and process scope
+
+Discovery reads skill metadata and the selected host settings needed to report
+skill state. It does not search unrelated files or inspect config values for
+credentials. Backups of host settings may contain secrets and must remain
+private. The OpenClaw child CLI receives only `PATH`, OS home/temp/runtime paths,
+documented OpenClaw path/profile variables, and the selected
+`OPENCLAW_CONFIG_PATH`; arbitrary process variables such as provider API tokens
+are not forwarded. Host CLIs still run with the current OS user's permissions;
+this skill does not sandbox them.
 
 ## Host-specific decisions
 

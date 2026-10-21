@@ -724,6 +724,29 @@ class CopilotParserTests(unittest.TestCase):
 
 
 class OpenClawAdapterTests(unittest.TestCase):
+    def test_child_environment_forwards_paths_but_not_arbitrary_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            config = base / "selected-openclaw.json"
+            values = {
+                "PATH": "C:\\tools",
+                "USERPROFILE": "C:\\Users\\operator",
+                "OPENCLAW_PROFILE": "work",
+                "OPENAI_API_KEY": "not-forwarded",
+                "CLAWHUB_TOKEN": "not-forwarded",
+            }
+            with mock.patch.dict(skillctl.os.environ, values, clear=True):
+                adapter = skillctl.OpenClawAdapter(base, config)
+
+                environment = adapter._environment()
+
+        self.assertEqual("C:\\tools", environment["PATH"])
+        self.assertEqual("C:\\Users\\operator", environment["USERPROFILE"])
+        self.assertEqual("work", environment["OPENCLAW_PROFILE"])
+        self.assertEqual(str(config), environment["OPENCLAW_CONFIG_PATH"])
+        self.assertNotIn("OPENAI_API_KEY", environment)
+        self.assertNotIn("CLAWHUB_TOKEN", environment)
+
     def test_fallback_discovery_uses_metadata_skill_key_and_config_state(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -808,6 +831,7 @@ class OpenClawAdapterTests(unittest.TestCase):
             self.assertEqual(
                 'skills.entries["demo"].enabled', run.call_args.args[0][3]
             )
+            self.assertIs(run.call_args.kwargs["shell"], False)
 
 
 class HermesAdapterTests(unittest.TestCase):

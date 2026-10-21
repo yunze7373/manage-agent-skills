@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 CODEX_BEGIN = "# BEGIN MANAGE_AGENT_SKILLS:CODEX"
 CODEX_END = "# END MANAGE_AGENT_SKILLS:CODEX"
 CODEX_LEGACY_BEGIN = "# BEGIN CODEX_SKILL_MANAGER"
@@ -64,6 +64,24 @@ CLAUDE_SETTING_FROM_ACTION = {
 }
 SET_STATES = ("on", "name-only", "user-invocable-only", "user-only", "off")
 BINARY_ACTIONS = {"enable", "disable"}
+OPENCLAW_CHILD_ENV_KEYS = (
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "TEMP",
+    "TMP",
+    "OPENCLAW_HOME",
+    "OPENCLAW_STATE_DIR",
+    "OPENCLAW_WORKSPACE_DIR",
+    "OPENCLAW_PROFILE",
+    "OPENCLAW_INCLUDE_ROOTS",
+)
 
 
 @dataclass(frozen=True)
@@ -194,21 +212,21 @@ def load_group_rules(path: Path | None) -> dict[str, list[str]]:
     groups = document.get("groups", {})
     if not isinstance(groups, dict):
         raise SystemExit("Group file groups must be an object.")
-    rules: dict[str, list[str]] = {}
+    patterns_by_group: dict[str, list[str]] = {}
     for group, patterns in groups.items():
         if not isinstance(patterns, list) or not all(
             isinstance(item, str) for item in patterns
         ):
             raise SystemExit(f"Group {group!r} must map to an array of patterns.")
-        rules[str(group)] = patterns
-    return rules
+        patterns_by_group[str(group)] = patterns
+    return patterns_by_group
 
 
 def apply_group_rules(
-    inventory: list[Skill], rules: dict[str, list[str]]
+    inventory: list[Skill], group_patterns: dict[str, list[str]]
 ) -> list[Skill]:
     """Re-group skills whose name, identifier, or directory matches a pattern."""
-    if not rules:
+    if not group_patterns:
         return inventory
     result: list[Skill] = []
     for item in inventory:
@@ -216,7 +234,7 @@ def apply_group_rules(
         if item.path:
             candidates.add(Path(item.path).parent.name.lower())
         group = item.group
-        for name, patterns in rules.items():
+        for name, patterns in group_patterns.items():
             if any(
                 fnmatch(candidate, pattern.lower())
                 for candidate in candidates
@@ -447,29 +465,29 @@ class CodexAdapter:
         if not payload:
             return set()
         parsed = tomllib.loads(payload)
-        rules: set[tuple[str, str]] = set()
+        disabled_entries: set[tuple[str, str]] = set()
         for entry in self._entries(parsed):
             if (entry.get("enabled") is not False
                     or set(entry) - {"name", "path", "enabled"}
                     or sum(isinstance(entry.get(key), str) for key in ("name", "path")) != 1):
                 raise SystemExit("Unsupported rule in managed Codex block; preserve and inspect it before editing.")
             if isinstance(entry.get("name"), str):
-                rules.add(("name", entry["name"].lower()))
+                disabled_entries.add(("name", entry["name"].lower()))
             elif isinstance(entry.get("path"), str):
-                rules.add(("path", path_key(entry["path"])))
-        return rules
+                disabled_entries.add(("path", path_key(entry["path"])))
+        return disabled_entries
 
     @staticmethod
     def _disabled_rules(parsed: dict[str, Any]) -> set[tuple[str, str]]:
-        rules: set[tuple[str, str]] = set()
+        disabled_entries: set[tuple[str, str]] = set()
         for entry in CodexAdapter._entries(parsed):
             if entry.get("enabled") is not False:
                 continue
             if isinstance(entry.get("name"), str):
-                rules.add(("name", entry["name"].lower()))
+                disabled_entries.add(("name", entry["name"].lower()))
             elif isinstance(entry.get("path"), str):
-                rules.add(("path", path_key(entry["path"])))
-        return rules
+                disabled_entries.add(("path", path_key(entry["path"])))
+        return disabled_entries
 
     @staticmethod
     def _item_rules(item: Skill) -> set[tuple[str, str]]:
@@ -984,6 +1002,7 @@ class CopilotAdapter:
             result = subprocess.run(
                 [self.executable, "skill", "list", "--json"],
                 cwd=self.cwd,
+                shell=False,
                 capture_output=True,
                 text=True,
                 check=False,
@@ -1117,7 +1136,13 @@ class OpenClawAdapter:
         return self.executable is not None, detail
 
     def _environment(self) -> dict[str, str]:
-        environment = os.environ.copy()
+        # The native CLI only needs host paths and its documented path/profile
+        # selectors. Do not pass unrelated provider/API credentials to it.
+        environment = {
+            key: os.environ[key]
+            for key in OPENCLAW_CHILD_ENV_KEYS
+            if key in os.environ
+        }
         environment["OPENCLAW_CONFIG_PATH"] = str(self.config)
         return environment
 
@@ -1128,6 +1153,7 @@ class OpenClawAdapter:
             [self.executable, *arguments],
             cwd=self.cwd,
             env=self._environment(),
+            shell=False,
             capture_output=True,
             text=True,
             check=False,
@@ -1285,6 +1311,7 @@ class OpenClawAdapter:
                         command,
                         cwd=self.cwd,
                         env=self._environment(),
+                        shell=False,
                         capture_output=True,
                         text=True,
                         check=False,
@@ -1640,7 +1667,7 @@ class AntigravityAdapter:
             moves.append({"skill": item.identity, "from": str(directory), "to": str(destination)})
         if conflicts:
             raise SystemExit(
-                "Refusing to overwrite existing skill directories: "
+                "Destination skill directories already exist; refusing to move targets: "
                 + ", ".join(f"{row['skill']} -> {row['existing']}" for row in conflicts)
             )
         if moves and not dry_run:

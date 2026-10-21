@@ -46,8 +46,8 @@ jobs:
       - name: Check dependency consistency
         run: python -m pip check
 
-      - name: Compile CLI
-        run: python -m py_compile skills/manage-agent-skills/scripts/skillctl.py
+      - name: Compile CLI and release helper
+        run: python -m py_compile skills/manage-agent-skills/scripts/skillctl.py scripts/release.py
 
       - name: Run tests
         run: python -m unittest discover -s tests -v
