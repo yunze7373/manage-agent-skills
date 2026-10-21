@@ -19,7 +19,7 @@ SPEC.loader.exec_module(release)
 
 class ReleaseVersionTests(unittest.TestCase):
     def test_tag_must_match_skill_and_cli_versions(self) -> None:
-        self.assertEqual(release.verify_tag("v0.2.1"), "0.2.1")
+        self.assertEqual(release.verify_tag("v1.0.1"), "1.0.1")
 
     def test_tag_mismatch_fails_closed(self) -> None:
         with self.assertRaisesRegex(SystemExit, "must match the skill version"):
@@ -30,11 +30,11 @@ class ReleaseArtifactTests(unittest.TestCase):
     def test_package_is_deterministic_and_has_matching_checksum(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary)
-            archive, sums = release.package("v0.2.1", output)
+            archive, sums = release.package("v1.0.1", output)
             first_archive = archive.read_bytes()
             first_sums = sums.read_bytes()
 
-            release.package("v0.2.1", output)
+            release.package("v1.0.1", output)
 
             self.assertEqual(archive.read_bytes(), first_archive)
             self.assertEqual(sums.read_bytes(), first_sums)
@@ -55,7 +55,7 @@ class ClawHubRetryTests(unittest.TestCase):
         }
         self.version = {
             "version": {
-                "version": "0.2.1",
+                "version": "1.0.1",
                 "files": [
                     {"path": name, "sha256": digest}
                     for name, digest in self.files.items()
@@ -69,7 +69,7 @@ class ClawHubRetryTests(unittest.TestCase):
         hashes.return_value = self.files
         fetch_json.side_effect = [(200, self.skill), (200, self.version)]
 
-        self.assertEqual(release.check_clawhub("v0.2.1"), "skip")
+        self.assertEqual(release.check_clawhub("v1.0.1"), "skip")
 
     @mock.patch.object(release, "local_skill_hashes")
     @mock.patch.object(release, "fetch_json")
@@ -77,14 +77,14 @@ class ClawHubRetryTests(unittest.TestCase):
         hashes.return_value = self.files
         conflicting = {
             "version": {
-                "version": "0.2.1",
+                "version": "1.0.1",
                 "files": [{"path": "SKILL.md", "sha256": "different"}],
             }
         }
         fetch_json.side_effect = [(200, self.skill), (200, conflicting)]
 
         with self.assertRaisesRegex(SystemExit, "refusing to overwrite it"):
-            release.check_clawhub("v0.2.1")
+            release.check_clawhub("v1.0.1")
 
     @mock.patch.object(release, "clawhub_scan_exists", return_value=False)
     @mock.patch.object(release, "fetch_json")
@@ -93,8 +93,8 @@ class ClawHubRetryTests(unittest.TestCase):
     ) -> None:
         fetch_json.side_effect = [(200, self.skill), (404, None)]
 
-        self.assertEqual(release.check_clawhub("v0.2.1"), "publish")
-        scan_exists.assert_called_once_with("0.2.1")
+        self.assertEqual(release.check_clawhub("v1.0.1"), "publish")
+        scan_exists.assert_called_once_with("1.0.1")
 
     @mock.patch.object(release, "clawhub_scan_exists", return_value=True)
     @mock.patch.object(release, "fetch_json")
@@ -104,9 +104,9 @@ class ClawHubRetryTests(unittest.TestCase):
         fetch_json.side_effect = [(200, self.skill), (404, None)]
 
         with self.assertRaisesRegex(SystemExit, "already submitted but is not publicly visible"):
-            release.check_clawhub("v0.2.1")
+            release.check_clawhub("v1.0.1")
 
-        scan_exists.assert_called_once_with("0.2.1")
+        scan_exists.assert_called_once_with("1.0.1")
 
 
 class ClawHubScanStateTests(unittest.TestCase):
@@ -117,7 +117,7 @@ class ClawHubScanStateTests(unittest.TestCase):
     ) -> None:
         run.return_value = subprocess.CompletedProcess([], 0, "Report ZIP: scan.zip", "")
 
-        self.assertTrue(release.clawhub_scan_exists("0.2.1"))
+        self.assertTrue(release.clawhub_scan_exists("1.0.1"))
 
     @mock.patch.object(release.shutil, "which", return_value="clawhub")
     @mock.patch.object(release.subprocess, "run")
@@ -126,7 +126,7 @@ class ClawHubScanStateTests(unittest.TestCase):
     ) -> None:
         run.return_value = subprocess.CompletedProcess([], 1, "", "Error: Skill version not found")
 
-        self.assertFalse(release.clawhub_scan_exists("0.2.1"))
+        self.assertFalse(release.clawhub_scan_exists("1.0.1"))
 
     @mock.patch.object(release.shutil, "which", return_value="clawhub")
     @mock.patch.object(release.subprocess, "run")
@@ -136,12 +136,12 @@ class ClawHubScanStateTests(unittest.TestCase):
         run.return_value = subprocess.CompletedProcess([], 1, "", "Error: unauthorized")
 
         with self.assertRaisesRegex(SystemExit, "submission state is unknown"):
-            release.clawhub_scan_exists("0.2.1")
+            release.clawhub_scan_exists("1.0.1")
 
     @mock.patch.object(release.shutil, "which", return_value=None)
     def test_missing_clawhub_cli_fails_closed(self, which: mock.Mock) -> None:
         with self.assertRaisesRegex(SystemExit, "ClawHub CLI is required"):
-            release.clawhub_scan_exists("0.2.1")
+            release.clawhub_scan_exists("1.0.1")
 
 
 class ClawHubPublicationVerificationTests(unittest.TestCase):
@@ -150,7 +150,7 @@ class ClawHubPublicationVerificationTests(unittest.TestCase):
     def test_waits_for_publication_then_verifies(
         self, check: mock.Mock, sleep: mock.Mock
     ) -> None:
-        release.verify_clawhub_publication("v0.2.1", timeout_seconds=60)
+        release.verify_clawhub_publication("v1.0.1", timeout_seconds=60)
 
         self.assertEqual(check.call_count, 2)
         self.assertTrue(check.call_args_list[0].kwargs["allow_submitted"])
@@ -159,7 +159,7 @@ class ClawHubPublicationVerificationTests(unittest.TestCase):
     @mock.patch.object(release.time, "sleep")
     @mock.patch.object(release, "check_clawhub", side_effect=["submitted", "skip"])
     def test_submitted_scan_report_waits_for_public_verdict(self, check, sleep) -> None:
-        release.verify_clawhub_publication("v0.2.1")
+        release.verify_clawhub_publication("v1.0.1")
         self.assertEqual(check.call_count, 2)
         sleep.assert_called_once()
 
@@ -167,7 +167,7 @@ class ClawHubPublicationVerificationTests(unittest.TestCase):
     @mock.patch.object(release, "check_clawhub", return_value="publish")
     def test_publication_verification_times_out(self, check: mock.Mock, monotonic: mock.Mock) -> None:
         with self.assertRaisesRegex(SystemExit, "did not become publicly available"):
-            release.verify_clawhub_publication("v0.2.1", timeout_seconds=0)
+            release.verify_clawhub_publication("v1.0.1", timeout_seconds=0)
 
 
 if __name__ == "__main__":

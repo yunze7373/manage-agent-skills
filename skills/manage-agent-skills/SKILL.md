@@ -2,7 +2,7 @@
 name: manage-agent-skills
 description: Audit installed Agent Skills and manage their host-specific visibility across Codex, Claude Code, Copilot CLI, OpenClaw, Hermes, and Antigravity. Use for skill inventory, duplicate or malformed metadata diagnosis, exact enable/disable changes, Claude visibility states, and reusable presets. Does not install skills or measure actual model token usage.
 metadata:
-  version: "0.2.1"
+  version: "1.0.1"
 ---
 
 # Manage Agent Skills

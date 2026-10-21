@@ -450,8 +450,9 @@ existing archive can be skipped; a conflicting archive fails. Neither job treats
 alone is not a final verdict: the post-publish check waits up to 30 minutes for
 public visibility. A retry refuses to re-upload a previously submitted hidden version.
 
-As verified on 2026-10-21, SkillHub already has `1.0.0`; the next common version
-must be higher (for example `1.0.1`). Do not push the existing `0.2.1` tag again.
+As verified on 2026-10-21, SkillHub already has `1.0.0`; the shared release
+candidate is `1.0.1`. Use the same version for `SKILL.md`, the CLI, Git tag,
+GitHub Release, ClawHub, and SkillHub. Do not push the existing `0.2.1` tag again.
 The `PUBLISH_TO_*` variables and `SKILLHUB_NAMESPACE`/`SKILLHUB_TOKEN` configuration
 from the old workflow are no longer used. SkillHub CLI reads `SKILLHUB_TOKEN`
 only inside the publish step, where it is mapped from the `SKILLHUB_KEY` secret.
@@ -477,9 +478,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full checklist.
 
 ## Project status
 
-The current version is **v0.2.0**. Check the CLI with `python <skillctl> --version`.
-The project is pre-1.0. The public API, preset schema, and supported host
-versions may evolve before `v1.0.0`.
+The source version is **v1.0.1**. Check the CLI with `python <skillctl> --version`.
+The public API, preset schema, and supported host versions may evolve over time.
 
 ## License
 
