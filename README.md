@@ -445,13 +445,15 @@ SKILL.md remains byte-identical. The official CLI archive is hash-pinned; when
 its upstream `latest.tar.gz` changes, review the new CLI and update the checksum
 in the workflow before releasing.
 
-Both channels preview publication, check existing versions, and verify public
-file hashes. SkillHub additionally verifies the credential owns the existing
-namespace and requires the requested version to become public latest. An exact
-existing archive can be skipped; a conflicting archive fails. Neither job treats
-"already exists" as proof of a successful release. ClawHub scan-report availability
-alone is not a final verdict: the post-publish check waits up to 30 minutes for
-public visibility. A retry refuses to re-upload a previously submitted hidden version.
+Both channels preview publication, check existing versions, and verify file
+hashes. SkillHub additionally verifies the credential owns the existing
+namespace. Its publish API can accept a version while platform review is still
+pending; in that state the workflow verifies the exact archive, reports that the
+public latest pointer has not advanced, and will not submit that version again.
+Once the platform promotes it, a rerun verifies it as public latest. ClawHub
+scan-report availability alone is not a final verdict: its post-publish check
+waits up to 30 minutes for public visibility, and a retry refuses to re-upload a
+previously submitted hidden version.
 
 If the SkillHub job fails after the GitHub Release exists, use the manual
 `Publish SkillHub version` workflow with the existing release tag. It checks that

@@ -15,7 +15,8 @@ import release
 class SkillHubTests(unittest.TestCase):
     def setUp(self):
         self.details = {"namespace": {"canonicalName": "@indiv-xmemo/manage-agent-skills"},
-                        "owner": {"handle": hub.OWNER}, "latestVersion": {"version": "1.0.0"}}
+                        "owner": {"handle": hub.OWNER}, "latestVersion": {"version": "1.0.0"},
+                        "skill": {"tags": {"latest": "1.0.0"}}}
 
     def test_prepared_payload_changes_only_skill_frontmatter(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,6 +90,7 @@ class SkillHubTests(unittest.TestCase):
     @mock.patch.object(hub, "fetch")
     def test_exact_archive_required_for_skip(self, fetch, details):
         self.details["latestVersion"]["version"] = "1.0.1"
+        self.details["skill"]["tags"]["latest"] = "1.0.1"
         details.return_value = self.details
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -107,6 +109,7 @@ class SkillHubTests(unittest.TestCase):
     def test_registry_sidecar_must_match_exact_version(self, fetch, details):
         import json
         self.details["latestVersion"]["version"] = "1.0.1"
+        self.details["skill"]["tags"]["latest"] = "1.0.1"
         details.return_value = self.details
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -122,6 +125,27 @@ class SkillHubTests(unittest.TestCase):
                 else:
                     with self.assertRaisesRegex(SystemExit, "different release"):
                         hub.check("v1.0.1", root, authenticate=False)
+
+    @mock.patch.object(hub, "details")
+    @mock.patch.object(hub, "fetch")
+    def test_submitted_review_version_is_not_republished(self, fetch, details):
+        self.details["skill"]["tags"]["latest"] = "1.0.1"
+        details.return_value = self.details
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "SKILL.md").write_bytes(b"skill")
+            out = io.BytesIO()
+            with ZipFile(out, "w") as bundle:
+                bundle.writestr("SKILL.md", b"skill")
+            fetch.return_value = (200, out.getvalue())
+            self.assertEqual(hub.check("v1.0.1", root, authenticate=False), "submitted")
+
+    @mock.patch.object(hub, "details")
+    @mock.patch.object(hub, "check", return_value="submitted")
+    def test_verification_reports_pending_review_without_retry(self, check, details):
+        details.return_value = self.details
+        hub.verify("v1.0.1", Path("unused"))
+        check.assert_called_once_with("v1.0.1", Path("unused"), authenticate=False)
 
     @mock.patch.object(hub.time, "monotonic", return_value=10)
     @mock.patch.object(hub, "check", return_value="publish")

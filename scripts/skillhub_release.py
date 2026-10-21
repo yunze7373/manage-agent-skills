@@ -117,18 +117,31 @@ def check(tag: str, payload: Path, *, authenticate: bool = True) -> str:
     if "SKILL.md" not in local or remote != local:
         fail("SkillHub archive differs from the requested release; refusing duplicate publication")
     if latest != version:
+        registry_latest = ((data.get("skill") or {}).get("tags") or {}).get("latest")
+        if registry_latest == version:
+            return "submitted"
         fail("SkillHub exact version exists but is not latest")
     return "skip"
 
 
 def verify(tag: str, payload: Path, timeout: int = 900) -> None:
     deadline = time.monotonic() + timeout
-    while check(tag, payload, authenticate=False) != "skip":
+    while True:
+        action = check(tag, payload, authenticate=False)
+        if action == "skip":
+            print("Verified SkillHub public latest version and every archive file hash")
+            return
+        if action == "submitted":
+            latest = (details().get("latestVersion") or {}).get("version", "unknown")
+            print(
+                f"Verified SkillHub v{tag[1:]} submission and archive hashes; "
+                f"public latest remains {latest}. Do not resubmit this version."
+            )
+            return
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             fail("SkillHub exact release did not become publicly available")
         time.sleep(min(30, remaining))
-    print("Verified SkillHub namespace, latest version and every public archive file hash")
 
 
 def main() -> None:
