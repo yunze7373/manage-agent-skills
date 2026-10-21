@@ -460,9 +460,11 @@ If the SkillHub job fails after the GitHub Release exists, use the manual
 the current source version matches that tag and republishes only from the
 immutable GitHub Release assets.
 
-As verified on 2026-10-21, SkillHub already has `1.0.0`; the shared release
-candidate is `1.0.1`. Use the same version for `SKILL.md`, the CLI, Git tag,
-GitHub Release, ClawHub, and SkillHub. Do not push the existing `0.2.1` tag again.
+As of 2026-10-21, the latest shared release is `1.0.1` across the source,
+GitHub, ClawHub, and SkillHub. For each future release, choose a version higher
+than SkillHub's current latest and use the same value for `SKILL.md`, the CLI,
+Git tag, GitHub Release, ClawHub, and SkillHub. Do not push the existing
+`0.2.1` tag again.
 The `PUBLISH_TO_*` variables and `SKILLHUB_NAMESPACE`/`SKILLHUB_TOKEN` configuration
 from the old workflow are no longer used. SkillHub CLI reads `SKILLHUB_TOKEN`
 only inside the publish step, where it is mapped from the `SKILLHUB_KEY` secret.
@@ -488,7 +490,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full checklist.
 
 ## Project status
 
-The source version is **v1.0.1**. Check the CLI with `python <skillctl> --version`.
+The current release is **v1.0.1**, aligned across GitHub, ClawHub, and SkillHub.
+Check the CLI with `python <skillctl> --version`.
 The public API, preset schema, and supported host versions may evolve over time.
 
 ## License
