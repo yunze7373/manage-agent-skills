@@ -1,0 +1,79 @@
+name: Publish SkillHub version
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing GitHub Release tag, such as v1.0.1
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skillhub-republish-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish exact release to skillhub.cn
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install metadata parser
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Verify requested release tag matches source version
+        run: python scripts/release.py verify "$RELEASE_TAG"
+
+      - name: Require SkillHub credentials
+        env:
+          SKILLHUB_KEY: ${{ secrets.SKILLHUB_KEY }}
+        run: test -n "$SKILLHUB_KEY"
+
+      - name: Install verified official SkillHub CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/skillhub-cli"
+          curl -fsSL https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/latest.tar.gz -o "$RUNNER_TEMP/skillhub-cli/kit.tar.gz"
+          echo "3bbe2ba15ada2eb7a94a2b760fead83be5f4164ab28a6c8b0944dbc539f7e236  $RUNNER_TEMP/skillhub-cli/kit.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/skillhub-cli/kit.tar.gz" -C "$RUNNER_TEMP/skillhub-cli"
+
+      - name: Download immutable GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$RELEASE_TAG" --pattern "manage-agent-skills-$RELEASE_TAG.zip" --pattern SHA256SUMS --dir "$RUNNER_TEMP/release"
+
+      - name: Verify archive and prepare SkillHub payload
+        run: python scripts/skillhub_release.py prepare "$RELEASE_TAG" --archive "$RUNNER_TEMP/release/manage-agent-skills-$RELEASE_TAG.zip" --checksums "$RUNNER_TEMP/release/SHA256SUMS" --payload "$RUNNER_TEMP/skillhub-payload"
+
+      - name: Verify target, credential owner and version
+        id: preflight
+        env:
+          SKILLHUB_KEY: ${{ secrets.SKILLHUB_KEY }}
+        run: python scripts/skillhub_release.py check "$RELEASE_TAG" --payload "$RUNNER_TEMP/skillhub-payload" --github-output "$GITHUB_OUTPUT"
+
+      - name: Preview SkillHub publication
+        if: steps.preflight.outputs.action == 'publish'
+        run: python "$RUNNER_TEMP/skillhub-cli/cli/skills_store_cli.py" publish "$RUNNER_TEMP/skillhub-payload" --host https://api.skillhub.cn --dry-run --json
+
+      - name: Publish exact version to skillhub.cn
+        if: steps.preflight.outputs.action == 'publish'
+        env:
+          SKILLHUB_TOKEN: ${{ secrets.SKILLHUB_KEY }}
+        run: python "$RUNNER_TEMP/skillhub-cli/cli/skills_store_cli.py" publish "$RUNNER_TEMP/skillhub-payload" --host https://api.skillhub.cn --changelog "See https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG" --json
+
+      - name: Verify public latest version and all files
+        run: python scripts/skillhub_release.py verify "$RELEASE_TAG" --payload "$RUNNER_TEMP/skillhub-payload"

@@ -39,6 +39,12 @@ def prepare(tag: str, archive: Path, checksums: Path, destination: Path) -> None
             name = "/".join(parts[1:])
             if name in payload or info.file_size > 10 * 1024 * 1024 or (info.external_attr >> 16) & 0o170000 == 0o120000:
                 fail("invalid release archive member")
+            # SkillHub rejects extensionless filenames; MIT is declared in the
+            # SkillHub frontmatter below, so omit the repository LICENSE file.
+            if not Path(name).suffix:
+                if name == "LICENSE":
+                    continue
+                fail(f"SkillHub payload contains an unsupported extensionless file: {name}")
             payload[name] = bundle.read(info)
     text = payload["SKILL.md"].decode("utf-8")
     _, front, body = text.split("---", 2)

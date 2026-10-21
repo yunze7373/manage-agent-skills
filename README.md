@@ -438,9 +438,12 @@ submission. Missing credentials fail the channel job instead of silently skippin
 
 The SkillHub flow follows memory-os-cli's XMemo release: download the GitHub
 Release archive, verify SHA-256, and add platform frontmatter only to the
-extracted SKILL.md. All other bytes remain identical. The official CLI archive
-is hash-pinned; when its upstream `latest.tar.gz` changes, review the new CLI
-and update the checksum in the workflow before releasing.
+extracted SKILL.md. The SkillHub API rejects extensionless filenames, so the
+root `LICENSE` file is omitted from this channel's payload; the package still
+declares `MIT` in its SkillHub metadata. Every retained file other than
+SKILL.md remains byte-identical. The official CLI archive is hash-pinned; when
+its upstream `latest.tar.gz` changes, review the new CLI and update the checksum
+in the workflow before releasing.
 
 Both channels preview publication, check existing versions, and verify public
 file hashes. SkillHub additionally verifies the credential owns the existing
@@ -449,6 +452,11 @@ existing archive can be skipped; a conflicting archive fails. Neither job treats
 "already exists" as proof of a successful release. ClawHub scan-report availability
 alone is not a final verdict: the post-publish check waits up to 30 minutes for
 public visibility. A retry refuses to re-upload a previously submitted hidden version.
+
+If the SkillHub job fails after the GitHub Release exists, use the manual
+`Publish SkillHub version` workflow with the existing release tag. It checks that
+the current source version matches that tag and republishes only from the
+immutable GitHub Release assets.
 
 As verified on 2026-10-21, SkillHub already has `1.0.0`; the shared release
 candidate is `1.0.1`. Use the same version for `SKILL.md`, the CLI, Git tag,

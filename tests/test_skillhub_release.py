@@ -1,3 +1,4 @@
+import hashlib
 import io
 import sys
 import tempfile
@@ -23,12 +24,18 @@ class SkillHubTests(unittest.TestCase):
             hub.prepare("v1.0.1", archive, checksum, root / "payload")
             with ZipFile(archive) as bundle:
                 changed = []
+                omitted = []
                 for name in bundle.namelist():
                     relative = name.split("/", 1)[1]
-                    new = (root / "payload" / relative).read_bytes()
+                    target = root / "payload" / relative
+                    if not target.exists():
+                        omitted.append(relative)
+                        continue
+                    new = target.read_bytes()
                     if new != bundle.read(name):
                         changed.append(relative)
                 self.assertEqual(changed, ["SKILL.md"])
+                self.assertEqual(omitted, ["LICENSE"])
                 old_body = bundle.read("manage-agent-skills/SKILL.md").split(b"---", 2)[2]
             new_text = (root / "payload/SKILL.md").read_bytes()
             self.assertEqual(new_text.split(b"---", 2)[2], old_body)
@@ -40,6 +47,18 @@ class SkillHubTests(unittest.TestCase):
             archive, checksum = release.package("v1.0.1", root)
             archive.write_bytes(b"tampered")
             with self.assertRaisesRegex(SystemExit, "checksum mismatch"):
+                hub.prepare("v1.0.1", archive, checksum, root / "payload")
+            self.assertFalse((root / "payload").exists())
+
+    def test_other_extensionless_files_rejected_before_writing_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive, checksum = release.package("v1.0.1", root)
+            with ZipFile(archive, "a") as bundle:
+                bundle.writestr("manage-agent-skills/NOTICE", b"unsupported extensionless file")
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            checksum.write_text(f"{digest}  {archive.name}\n", encoding="ascii")
+            with self.assertRaisesRegex(SystemExit, "unsupported extensionless file: NOTICE"):
                 hub.prepare("v1.0.1", archive, checksum, root / "payload")
             self.assertFalse((root / "payload").exists())
 
