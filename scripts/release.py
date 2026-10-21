@@ -105,7 +105,7 @@ def packaged_files() -> list[tuple[Path, str]]:
 
 def local_skill_hashes() -> dict[str, str]:
     return {
-        path.relative_to(SKILL_DIR).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+        path.relative_to(SKILL_DIR).as_posix(): hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
         for path, archive_name in packaged_files()
         if archive_name.startswith(f"{SLUG}/")
         and archive_name not in {f"{SLUG}/LICENSE", f"{SLUG}/requirements.txt"}
@@ -161,7 +161,7 @@ def package(tag: str, output_dir: Path) -> tuple[Path, Path]:
             info = zipfile.ZipInfo(archive_name, date_time=(1980, 1, 1, 0, 0, 0))
             info.compress_type = zipfile.ZIP_STORED
             info.external_attr = 0o100644 << 16
-            bundle.writestr(info, path.read_bytes())
+            bundle.writestr(info, path.read_bytes().replace(b"\r\n", b"\n"))
 
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     checksums = output_dir / "SHA256SUMS"
@@ -255,11 +255,6 @@ def verify_clawhub_publication(tag: str, timeout_seconds: int = 1800) -> None:
         if action == "skip":
             print(f"Verified ClawHub version {version} and every packaged file hash.")
             return
-        if action == "submitted":
-            fail(
-                f"ClawHub version {version} has a completed scan report but is not publicly visible; "
-                "review its scan/moderation state"
-            )
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             fail(f"ClawHub version {version} did not become publicly available before timeout")
@@ -267,52 +262,6 @@ def verify_clawhub_publication(tag: str, timeout_seconds: int = 1800) -> None:
             print("Waiting for ClawHub publication checks to finish...", flush=True)
             announced_wait = True
         time.sleep(min(30, remaining))
-
-
-def check_skillhub(tag: str, namespace: str) -> str:
-    version = verify_tag(tag)
-    if not namespace.strip():
-        fail("SkillHub namespace must not be empty")
-    token = os.environ.get("SKILLHUB_TOKEN")
-    registry = "https://skill.xfyun.cn"
-    coordinate = "/".join(urllib.parse.quote(part, safe="") for part in (namespace, SLUG))
-    base = f"{registry}/api/v1/skills/{coordinate}"
-    status, skill_payload = fetch_json(base, bearer_token=token)
-    if status == 404:
-        return "publish"
-    skill_data = (skill_payload or {}).get("data") or {}
-    if skill_data.get("slug") != SLUG or skill_data.get("namespace") != namespace:
-        fail("SkillHub returned a different skill for the requested namespace and slug")
-
-    status, version_payload = fetch_json(
-        f"{base}/versions/{urllib.parse.quote(version, safe='')}", bearer_token=token
-    )
-    if status == 404:
-        return "publish"
-    version_data = (version_payload or {}).get("data") or {}
-    if version_data.get("version") != version:
-        fail("SkillHub returned a different version for the requested tag")
-    if version_data.get("status") != "PUBLISHED":
-        fail(f"SkillHub version {version} is {version_data.get('status', 'unknown')}; resolve its review state before retrying")
-
-    download_url = f"{base}/versions/{urllib.parse.quote(version, safe='')}/download"
-    status, archive_bytes = fetch(download_url, accept="application/zip", bearer_token=token)
-    if status == 404 or not archive_bytes:
-        fail("SkillHub reports a published version but its archive is unavailable")
-    if len(archive_bytes) > 100 * 1024 * 1024:
-        fail("SkillHub archive exceeded the 100 MiB verification limit")
-    try:
-        with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
-            remote_hashes = {
-                name: hashlib.sha256(archive.read(name)).hexdigest()
-                for name in archive.namelist()
-                if not name.endswith("/")
-            }
-    except (zipfile.BadZipFile, KeyError, OSError) as error:
-        fail(f"could not verify the SkillHub release archive: {error}")
-    if remote_hashes != local_skill_hashes():
-        fail("the existing SkillHub version differs from this tag; refusing to overwrite it")
-    return "skip"
 
 
 def main() -> int:
@@ -329,11 +278,6 @@ def main() -> int:
     clawhub_parser = subparsers.add_parser("clawhub-check", help="fail-closed ClawHub retry check")
     clawhub_parser.add_argument("tag")
     clawhub_parser.add_argument("--github-output", type=Path)
-
-    skillhub_parser = subparsers.add_parser("skillhub-check", help="fail-closed SkillHub retry check")
-    skillhub_parser.add_argument("tag")
-    skillhub_parser.add_argument("--namespace", required=True)
-    skillhub_parser.add_argument("--github-output", type=Path)
 
     clawhub_verify_parser = subparsers.add_parser(
         "clawhub-verify", help="require the exact ClawHub version to be publicly available"
@@ -356,13 +300,6 @@ def main() -> int:
         print(f"ClawHub action: {action}.")
     elif args.command == "clawhub-verify":
         verify_clawhub_publication(args.tag)
-    elif args.command == "skillhub-check":
-        action = check_skillhub(args.tag, args.namespace)
-        message = f"action={action}\n"
-        if args.github_output:
-            with args.github_output.open("a", encoding="utf-8", newline="\n") as output:
-                output.write(message)
-        print(f"SkillHub action: {action}.")
     return 0
 
 

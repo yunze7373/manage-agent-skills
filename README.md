@@ -425,24 +425,36 @@ cross-platform manager tests, then creates a GitHub Release with a deterministic
 ZIP and `SHA256SUMS`. The ZIP contains the installable skill, its license, and
 its Python dependency file.
 
-ClawHub publishing is enabled by setting the repository Actions variable
-`PUBLISH_TO_CLAWHUB` to `true` and adding a `CLAWHUB_TOKEN` Actions secret. The
-workflow publishes the matching semantic version with the fixed slug and
-display name, links it to the tagged source commit, and runs a dry-run first.
-Retries skip an already-published version only when its owner, display name,
-file list, and SHA-256 hashes match. If a version is missing from public
-endpoints but already has a ClawHub scan report, the workflow stops for review
-instead of re-uploading a hidden or pending submission. It verifies the exact
-public version and file hashes before the channel job succeeds.
+Both registry jobs run automatically after the GitHub Release job succeeds.
+They run independently: a scan delay on ClawHub does not prevent SkillHub
+submission. Missing credentials fail the channel job instead of silently skipping it.
 
-SkillHub publishing can be enabled separately with the `PUBLISH_TO_SKILLHUB`
-Actions variable set to `true`, a `SKILLHUB_TOKEN` Actions secret, and the
-publisher namespace in the `SKILLHUB_NAMESPACE` Actions variable. It previews
-the package before publishing publicly. Retries download the exact published
-version and compare every file hash before skipping; a conflict or pending
-review stops that channel. Each registry remains an independent job, so an
-unavailable registry does not remove the GitHub release or publish to another
-registry.
+- ClawHub target: `yunze7373/manage-agent-skills`; repository secret `CLAWHUB_TOKEN`.
+- SkillHub target: `https://skillhub.cn/skills/indiv-xmemo/manage-agent-skills`;
+  repository secret `SKILLHUB_KEY` for its current owner `user_aad66cab`.
+  This uses the official skillhub.cn CLI and `https://api.skillhub.cn`, not
+  the unrelated xfyun registry. GitHub secrets cannot be copied out of another
+  repository; provision the key directly into this repository.
+
+The SkillHub flow follows memory-os-cli's XMemo release: download the GitHub
+Release archive, verify SHA-256, and add platform frontmatter only to the
+extracted SKILL.md. All other bytes remain identical. The official CLI archive
+is hash-pinned; when its upstream `latest.tar.gz` changes, review the new CLI
+and update the checksum in the workflow before releasing.
+
+Both channels preview publication, check existing versions, and verify public
+file hashes. SkillHub additionally verifies the credential owns the existing
+namespace and requires the requested version to become public latest. An exact
+existing archive can be skipped; a conflicting archive fails. Neither job treats
+"already exists" as proof of a successful release. ClawHub scan-report availability
+alone is not a final verdict: the post-publish check waits up to 30 minutes for
+public visibility. A retry refuses to re-upload a previously submitted hidden version.
+
+As verified on 2026-10-21, SkillHub already has `1.0.0`; the next common version
+must be higher (for example `1.0.1`). Do not push the existing `0.2.1` tag again.
+The `PUBLISH_TO_*` variables and `SKILLHUB_NAMESPACE`/`SKILLHUB_TOKEN` configuration
+from the old workflow are no longer used. SkillHub CLI reads `SKILLHUB_TOKEN`
+only inside the publish step, where it is mapped from the `SKILLHUB_KEY` secret.
 
 For a new version, update both `metadata.version` in
 `skills/manage-agent-skills/SKILL.md` and `VERSION` in `skillctl.py`, merge the

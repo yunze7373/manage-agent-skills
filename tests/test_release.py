@@ -156,10 +156,12 @@ class ClawHubPublicationVerificationTests(unittest.TestCase):
         self.assertTrue(check.call_args_list[0].kwargs["allow_submitted"])
         sleep.assert_called_once_with(30)
 
-    @mock.patch.object(release, "check_clawhub", return_value="submitted")
-    def test_completed_hidden_submission_stops_verification(self, check: mock.Mock) -> None:
-        with self.assertRaisesRegex(SystemExit, "completed scan report but is not publicly visible"):
-            release.verify_clawhub_publication("v0.2.1")
+    @mock.patch.object(release.time, "sleep")
+    @mock.patch.object(release, "check_clawhub", side_effect=["submitted", "skip"])
+    def test_submitted_scan_report_waits_for_public_verdict(self, check, sleep) -> None:
+        release.verify_clawhub_publication("v0.2.1")
+        self.assertEqual(check.call_count, 2)
+        sleep.assert_called_once()
 
     @mock.patch.object(release.time, "monotonic", return_value=10)
     @mock.patch.object(release, "check_clawhub", return_value="publish")

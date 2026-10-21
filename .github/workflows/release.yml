@@ -105,7 +105,6 @@ jobs:
   clawhub:
     name: Publish to ClawHub
     needs: release
-    if: ${{ vars.PUBLISH_TO_CLAWHUB == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -184,56 +183,47 @@ jobs:
         run: python scripts/release.py clawhub-verify "$GITHUB_REF_NAME"
 
   skillhub:
-    name: Publish to SkillHub
+    name: Publish to skillhub.cn
     needs: release
-    if: ${{ vars.PUBLISH_TO_SKILLHUB == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
-      - name: Check out tagged commit
-        uses: actions/checkout@v6
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
-
       - name: Install metadata parser
-        run: python -m pip install --disable-pip-version-check -r requirements.txt
-
-      - name: Verify SkillHub namespace configuration
+        run: python -m pip install -r requirements.txt
+      - name: Require SkillHub credentials
         env:
-          SKILLHUB_NAMESPACE: ${{ vars.SKILLHUB_NAMESPACE }}
-        run: test -n "$SKILLHUB_NAMESPACE"
-
-      - name: Check existing SkillHub version
+          SKILLHUB_KEY: ${{ secrets.SKILLHUB_KEY }}
+        run: test -n "$SKILLHUB_KEY"
+      - name: Install verified official SkillHub CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/skillhub-cli"
+          curl -fsSL https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com/install/latest.tar.gz -o "$RUNNER_TEMP/skillhub-cli/kit.tar.gz"
+          echo "3bbe2ba15ada2eb7a94a2b760fead83be5f4164ab28a6c8b0944dbc539f7e236  $RUNNER_TEMP/skillhub-cli/kit.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/skillhub-cli/kit.tar.gz" -C "$RUNNER_TEMP/skillhub-cli"
+      - name: Download immutable GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --pattern "manage-agent-skills-$GITHUB_REF_NAME.zip" --pattern SHA256SUMS --dir "$RUNNER_TEMP/release"
+      - name: Verify archive and adapt only SkillHub frontmatter
+        run: python scripts/skillhub_release.py prepare "$GITHUB_REF_NAME" --archive "$RUNNER_TEMP/release/manage-agent-skills-$GITHUB_REF_NAME.zip" --checksums "$RUNNER_TEMP/release/SHA256SUMS" --payload "$RUNNER_TEMP/skillhub-payload"
+      - name: Verify existing target, credential owner and version
         id: preflight
         env:
-          SKILLHUB_NAMESPACE: ${{ vars.SKILLHUB_NAMESPACE }}
-          SKILLHUB_TOKEN: ${{ secrets.SKILLHUB_TOKEN }}
-        run: python scripts/release.py skillhub-check "$GITHUB_REF_NAME" --namespace "$SKILLHUB_NAMESPACE" --github-output "$GITHUB_OUTPUT"
-
-      - name: Verify SkillHub publishing credentials
-        if: ${{ steps.preflight.outputs.action == 'publish' }}
+          SKILLHUB_KEY: ${{ secrets.SKILLHUB_KEY }}
+        run: python scripts/skillhub_release.py check "$GITHUB_REF_NAME" --payload "$RUNNER_TEMP/skillhub-payload" --github-output "$GITHUB_OUTPUT"
+      - name: Preview SkillHub publication
+        if: steps.preflight.outputs.action == 'publish'
+        run: python "$RUNNER_TEMP/skillhub-cli/cli/skills_store_cli.py" publish "$RUNNER_TEMP/skillhub-payload" --host https://api.skillhub.cn --dry-run --json
+      - name: Publish exact version to skillhub.cn
+        if: steps.preflight.outputs.action == 'publish'
         env:
-          SKILLHUB_TOKEN: ${{ secrets.SKILLHUB_TOKEN }}
-        run: test -n "$SKILLHUB_TOKEN"
-
-      - name: Preview SkillHub package
-        if: ${{ steps.preflight.outputs.action == 'publish' }}
-        env:
-          SKILLHUB_TOKEN: ${{ secrets.SKILLHUB_TOKEN }}
-          SKILLHUB_NAMESPACE: ${{ vars.SKILLHUB_NAMESPACE }}
-        run: npx --yes @astron-team/skillhub@0.1.12 publish skills/manage-agent-skills --namespace "$SKILLHUB_NAMESPACE" --visibility public --registry https://skill.xfyun.cn --dry-run --json
-
-      - name: Publish to SkillHub
-        if: ${{ steps.preflight.outputs.action == 'publish' }}
-        env:
-          SKILLHUB_TOKEN: ${{ secrets.SKILLHUB_TOKEN }}
-          SKILLHUB_NAMESPACE: ${{ vars.SKILLHUB_NAMESPACE }}
-        run: npx --yes @astron-team/skillhub@0.1.12 publish skills/manage-agent-skills --namespace "$SKILLHUB_NAMESPACE" --visibility public --registry https://skill.xfyun.cn --json
-
-      - name: Verify published SkillHub files
-        env:
-          SKILLHUB_NAMESPACE: ${{ vars.SKILLHUB_NAMESPACE }}
-          SKILLHUB_TOKEN: ${{ secrets.SKILLHUB_TOKEN }}
-        run: python scripts/release.py skillhub-check "$GITHUB_REF_NAME" --namespace "$SKILLHUB_NAMESPACE"
+          SKILLHUB_TOKEN: ${{ secrets.SKILLHUB_KEY }}
+        run: python "$RUNNER_TEMP/skillhub-cli/cli/skills_store_cli.py" publish "$RUNNER_TEMP/skillhub-payload" --host https://api.skillhub.cn --changelog "See https://github.com/$GITHUB_REPOSITORY/releases/tag/$GITHUB_REF_NAME" --json
+      - name: Verify public latest version and all files
+        run: python scripts/skillhub_release.py verify "$GITHUB_REF_NAME" --payload "$RUNNER_TEMP/skillhub-payload"
