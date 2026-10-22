@@ -153,7 +153,7 @@ class DiscoveryWorkflowTests(unittest.TestCase):
         local.write_text('{"skillOverrides":{"demo":"off"}}')
         adapter = skillctl.ClaudeAdapter(self.cwd)
         result = skillctl.inspect_targets(adapter, adapter.discover())
-        self.assertIn(str(local), result["additional_config_layers"])
+        self.assertIn(local.resolve(), [Path(value).resolve() for value in result["additional_config_layers"]])
         self.assertFalse(adapter.config.exists())
         self.assertTrue(path.exists())
 

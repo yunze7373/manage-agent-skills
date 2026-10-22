@@ -34,7 +34,7 @@ Built by [Han (@yunze7373)](https://github.com/yunze7373) ·
 
 ## Why
 
-New in v1.1.0: description search,
+New in v1.1.1: description search,
 bounded ranked results, offline inventory snapshots, activation inspection, and
 scoped Gemini CLI/OpenCode adapters. See [implementation and validation](docs/improvements-2026-10-23.md).
 
@@ -549,7 +549,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full checklist.
 
 ## Project status
 
-The source version is **v1.1.0**. See GitHub Releases and the registry pages for publication status.
+The source version is **v1.1.1**. See GitHub Releases and the registry pages for publication status.
 Check the CLI with `python <skillctl> --version`.
 The public API, preset schema, and supported host versions may evolve over time.
 

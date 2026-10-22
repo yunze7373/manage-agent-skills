@@ -2,7 +2,7 @@
 name: manage-agent-skills
 description: Find installed skills by task or description, including disabled skills, and enable exact matches when requested. Audit and manage skill visibility on Codex, Claude Code, Copilot CLI, OpenClaw, Hermes, Antigravity, Gemini CLI, and OpenCode. Use when users need a skill, cannot find one, or want fewer active skills. Does not install skills or measure actual token savings.
 metadata:
-  version: "1.1.0"
+  version: "1.1.1"
 ---
 
 # Manage Agent Skills
