@@ -18,6 +18,14 @@
   not proof of host installation, authentication or current prompt state.
 - `audit`: 1 for errors; warnings alone return 0. `--strict` also fails on warnings.
   Informational compatibility boundaries never fail strict mode by themselves.
+- `search` / `index`: 1 if any selected adapter failed; healthy results survive.
+  Search defaults to 20 ranked results, including description matches; `--limit 0`
+  returns all. Use `--report --json` for structured errors and truncation metadata.
+  Without `--report`, JSON search remains an array and diagnostics go to stderr.
+- `inspect`: read-only activation preview. Known enable blockers return 1.
+  A successful preview is not evidence of live prompt visibility or invocation.
+- Offline indexes are dated snapshots, not configuration authority. Rebuild to a
+  new private path after changes. Mutation commands always use fresh discovery.
 - Argument parser errors use argparse's exit code 2. Mutation refusals return
   nonzero. JSON output covers successful results and read-only diagnostics;
   mutation refusals can still be plain stderr, so check the exit status first.

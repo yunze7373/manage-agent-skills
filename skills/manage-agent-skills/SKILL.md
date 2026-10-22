@@ -1,8 +1,8 @@
 ---
 name: manage-agent-skills
-description: Audit installed Agent Skills and manage their host-specific visibility across Codex, Claude Code, Copilot CLI, OpenClaw, Hermes, and Antigravity. Use for skill inventory, duplicate or malformed metadata diagnosis, exact enable/disable changes, Claude visibility states, and reusable presets. Does not install skills or measure actual model token usage.
+description: Find installed skills by task or description, including disabled skills, and enable exact matches when requested. Audit and manage skill visibility on Codex, Claude Code, Copilot CLI, OpenClaw, Hermes, Antigravity, Gemini CLI, and OpenCode. Use when users need a skill, cannot find one, or want fewer active skills. Does not install skills or measure actual token savings.
 metadata:
-  version: "1.0.1"
+  version: "1.1.0"
 ---
 
 # Manage Agent Skills
@@ -18,8 +18,15 @@ PyYAML is required for safe metadata parsing. Never start a watcher.
   duplicate identities, configuration layers, and compatibility limitations.
   `audit --strict` returns nonzero for warnings as well as errors. It does not
   decide whether arbitrary skill instructions are factually up to date.
-- **Find:** `--platform <host> search <query>` prints exact names, host keys,
-  groups and paths. Search is fuzzy; mutations are exact.
+- **Find:** `--platform <host> search <query> --report --json` searches names,
+  descriptions, groups and paths, including disabled skills. Use short task
+  keywords; all space-separated words must match. Results are ranked and limited
+  to 20; `--limit 5` reduces output. Mutations remain exact.
+- **Fast repeat lookup:** `index --output <new-private-file.json>` exports metadata;
+  `search <query> --index <file> --report --json` avoids host calls. This is a dated
+  snapshot; rebuild after installations/updates. It cannot authorize mutations.
+- **Check activation:** `--platform <host> inspect <exact-selector> --json`
+  previews enablement and reports refresh guidance without writing.
 - **Change:** resolve the requested scope, preview with `--dry-run`, then apply
   the same command. Existing user authorization is sufficient; do not ask for
   confirmation again solely because a preview completed.
@@ -45,6 +52,27 @@ Unknown names fail by default. Only use `--allow-undiscovered` for an explicitly
 requested literal host key on Copilot/OpenClaw/Hermes; it is not typo correction.
 Groups normally identify discovery sources. A `--groups file.json` can define
 user taxonomy; never infer groups from skill names without that file.
+
+## On-demand activation
+
+When a user needs installed expertise, search short task keywords first. If the
+user's language differs from metadata, also search translated keywords; optional
+`--aliases file.json` supplies explicit word-to-synonym arrays. Read only the
+top matching descriptions, not every SKILL.md. Do not call lexical matching semantic search.
+
+Select the exact host and path/key from results. If multiple skills fit, compare
+their descriptions and scope before choosing. Inspect and preview the exact
+target. Enable when the user has requested using/enabling that capability; a
+search-only request does not authorize a configuration change. Stop on blocked
+results and report the reason rather than enabling an entire plugin or weakening
+another policy. Follow returned refresh guidance and verify with the host's
+native listing/invocation before claiming the skill is usable in this session.
+If a restart is required, state that boundary. The manager does not restart hosts.
+
+Keep this small management entry discoverable when using a lean skill profile.
+Implicit invocation is allowed in Codex; this does not guarantee host selection
+or zero metadata cost. Search errors are isolated by platform; partial results
+return nonzero, so inspect `errors` instead of treating the catalog as complete.
 
 ## Data and process scope
 
@@ -76,6 +104,16 @@ controls can affect the actual host result.
 OpenClaw requires its CLI for writes. Hermes `--hermes-scope telegram` targets
 a platform list; global disables still win. Its essential `hermes-agent` skill
 cannot be disabled, even with `--force`.
+
+**Gemini CLI:** `--platform gemini` manages `skills.disabled` in user settings;
+`--gemini-scope workspace` selects `<cwd>/.gemini/settings.json`. Local workspace,
+user and shared roots are indexed. Built-in/extension skills and other settings
+layers require host verification. A global `skills.enabled=false` blocks enable.
+
+**OpenCode:** `--platform opencode` manages exact `permission.skill` rules;
+enable is `allow`, disable is `deny`. Other permissions are preserved, and exact
+rules follow existing wildcard rules. Select `--opencode-config` explicitly for
+JSONC. Project/per-agent/tool controls may still override the selected file.
 
 **Antigravity:** select the surface explicitly when managing CLI skills:
 

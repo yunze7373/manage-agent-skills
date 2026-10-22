@@ -67,3 +67,6 @@ $RECYCLE.BIN/
 # Local tooling
 .cache/
 .python-version
+
+# Private inventory snapshots contain installed paths and descriptions
+*.skill-index.json

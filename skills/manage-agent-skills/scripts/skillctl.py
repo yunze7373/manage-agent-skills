@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 import tomllib
 from dataclasses import asdict, dataclass
 from fnmatch import fnmatch
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 CODEX_BEGIN = "# BEGIN MANAGE_AGENT_SKILLS:CODEX"
 CODEX_END = "# END MANAGE_AGENT_SKILLS:CODEX"
 CODEX_LEGACY_BEGIN = "# BEGIN CODEX_SKILL_MANAGER"
@@ -29,7 +30,7 @@ PROTECTED_NAMES = {
     "plugin-creator",
     "skill-creator",
 }
-PLATFORMS = ("codex", "claude", "copilot", "openclaw", "hermes", "antigravity")
+PLATFORMS = ("codex", "claude", "copilot", "openclaw", "hermes", "antigravity", "gemini", "opencode")
 
 # This Antigravity adapter uses directory parking rather than a native per-skill
 # switch, so it is the one exception to the
@@ -94,6 +95,7 @@ class Skill:
     state: str = "unknown"
     config_key: str = ""
     context_visible: bool | None = None
+    description: str = ""
 
     @property
     def key(self) -> str:
@@ -140,6 +142,19 @@ def read_skill_name(skill_file: Path) -> str:
     return name.strip() if isinstance(name, str) and name.strip() else skill_file.parent.name
 
 
+def skill_description(item: Skill) -> str:
+    """Metadata only: never load a skill body into search results."""
+    if item.description:
+        return item.description[:1024]
+    if item.path:
+        try:
+            value = read_frontmatter(Path(item.path)).get("description", "")
+            return value[:1024] if isinstance(value, str) else ""
+        except ValueError:
+            pass
+    return ""
+
+
 def read_openclaw_skill_key(skill_file: Path, fallback: str) -> str:
     try:
         metadata = read_frontmatter(skill_file).get("metadata", {})
@@ -177,7 +192,13 @@ def scan_roots(
                 continue
             # Groups describe where a skill was discovered. Any other taxonomy
             # is machine-specific, so it comes from the user's --groups file.
-            name = read_skill_name(skill_file)
+            try:
+                metadata = read_frontmatter(skill_file)
+            except ValueError:
+                metadata = {}
+            name = metadata.get("name")
+            name = name.strip() if isinstance(name, str) and name.strip() else skill_file.parent.name
+            description = metadata.get("description", "")
             config_key = (
                 f"{group}:{name}"
                 if platform == "codex" and origin.startswith("plugin:")
@@ -190,6 +211,7 @@ def scan_roots(
                 group=group,
                 origin=origin,
                 config_key=config_key,
+                description=description[:1024] if isinstance(description, str) else "",
             )
     return sorted(found.values(), key=lambda item: (item.group, item.name, item.key))
 
@@ -689,6 +711,17 @@ class CodexAdapter:
             else ("path", item.key) for item in targets
             if not self._item_rules(item) & external
         }
+        if action == "enable":
+            enabled_plugins = self._enabled_plugins(parsed)
+            blocked = [
+                {"target": item.identity, "reason": "plugin_not_enabled_in_selected_config",
+                 "next_action": "Verify and enable the owning plugin in Codex, then retry."}
+                for item in targets if not self._plugin_enabled(item, enabled_plugins)
+            ]
+            if blocked:
+                return {"platform": self.name, "action": action, "changed": False,
+                        "dry_run": dry_run, "blocked": blocked,
+                        "context_visibility": "unverified", "new_session_recommended": False}
         if action == "disable":
             protected = sorted(
                 {item.name for item in targets if item.name in PROTECTED_NAMES}
@@ -888,6 +921,7 @@ def parse_copilot_inventory(payload: Any) -> list[Skill]:
             group=str(item.get("scope", "copilot")),
             origin="copilot-cli",
             state=state,
+            description=item.get("description", "")[:1024] if isinstance(item.get("description"), str) else "",
         )
     return sorted(found.values(), key=lambda skill: (skill.group, skill.name, skill.key))
 
@@ -1106,6 +1140,7 @@ def parse_openclaw_inventory(payload: Any) -> list[Skill]:
             origin="openclaw-cli",
             state=state,
             config_key=key,
+            description=item.get("description", "")[:1024] if isinstance(item.get("description"), str) else "",
         )
     return sorted(found.values(), key=lambda skill: (skill.group, skill.name, skill.key))
 
@@ -1712,6 +1747,171 @@ class AntigravityAdapter:
         }
 
 
+def load_json_settings(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        value = parse_jsonc(path.read_text(encoding="utf-8-sig"))
+        if not isinstance(value, dict):
+            raise ValueError()
+        return value
+    except (ValueError, UnicodeError):
+        raise SystemExit("Invalid JSON/JSONC settings; refusing to modify configuration.") from None
+
+
+class GeminiAdapter:
+    """Selected settings layer only; never conflate Gemini with Antigravity."""
+    name = "gemini"
+
+    def __init__(self, cwd: Path, config: Path | None = None, scope: str = "user") -> None:
+        self.cwd = cwd
+        self.scope = scope
+        self.user_root = Path(os.environ.get("GEMINI_CLI_HOME") or str(Path.home())).expanduser()
+        self.home = self.user_root / ".gemini"
+        self.config = config or ((cwd / ".gemini" if scope == "workspace" else self.home) / "settings.json")
+
+    def available(self) -> tuple[bool, str]:
+        return True, f"{self.config} (selected {self.scope} settings; local skills only)"
+
+    def _load(self) -> dict[str, Any]:
+        value = load_json_settings(self.config)
+        skills = value.get("skills", {})
+        if not isinstance(skills, dict) or not isinstance(skills.get("enabled", True), bool):
+            raise SystemExit("Gemini skills must be an object with a boolean enabled value.")
+        disabled = skills.get("disabled", [])
+        if not isinstance(disabled, list) or any(not isinstance(s, str) for s in disabled):
+            raise SystemExit("Gemini skills.disabled must be an array of strings.")
+        return value
+
+    def discover(self) -> list[Skill]:
+        data = self._load()
+        settings = data.get("skills", {})
+        roots = [(base / directory / "skills", group, group, SKILL_GLOB_FLAT)
+                 for base, group in [(self.cwd, "gemini-workspace"), (self.user_root, "gemini-user")]
+                 for directory in (".agents", ".gemini")]
+        return [Skill(**{**asdict(item), "state": "off" if self._admin_blocked(data) or settings.get("enabled") is False
+                        or item.name in settings.get("disabled", []) else "on"})
+                for item in scan_roots(self.name, roots)]
+
+    @staticmethod
+    def _admin_blocked(data: dict[str, Any]) -> bool:
+        admin = data.get("admin", {})
+        skills = admin.get("skills", {}) if isinstance(admin, dict) else {}
+        return isinstance(skills, dict) and skills.get("enabled") is False
+
+    def mutate(self, action: str, targets: list[Skill], dry_run: bool, force: bool) -> dict[str, Any]:
+        require_binary_action(self.name, action)
+        settings = self._load()
+        skills = dict(settings.get("skills", {}))
+        if action == "disable" and not force and any(item.name in PROTECTED_NAMES for item in targets):
+            raise SystemExit("Protected skills require --force.")
+        if action == "enable" and (skills.get("enabled") is False or self._admin_blocked(settings)):
+            return {"platform": self.name, "changed": False, "dry_run": dry_run,
+                    "blocked": [{"reason": "skills_globally_disabled", "config": str(self.config)}]}
+        before = list(skills.get("disabled", []))
+        names = {item.name for item in targets}
+        after = sorted(set(before) | names) if action == "disable" else [s for s in before if s not in names]
+        skills["disabled"] = after
+        settings["skills"] = skills
+        changed = before != after
+        backup = write_atomic(self.config, json.dumps(settings, ensure_ascii=False, indent=2) + "\n") if changed and not dry_run else None
+        return {"platform": self.name, "action": action, "targets": sorted(names), "changed": changed,
+                "dry_run": dry_run, "config": str(self.config), "scope": self.scope,
+                "backup": str(backup) if backup else None, "new_session_recommended": changed and not dry_run,
+                "state_scope": "selected settings only; workspace/system/extension policy may differ"}
+
+
+class OpenCodeAdapter:
+    """Local roots and selected permission.skill rules, not a merged host resolver."""
+    name = "opencode"
+
+    def __init__(self, cwd: Path, config: Path | None = None) -> None:
+        self.cwd = cwd
+        self.home = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))) / "opencode"
+        configured = os.environ.get("OPENCODE_CONFIG")
+        self.config = config or (Path(configured).expanduser() if configured else self.home / "opencode.json")
+        self.explicit_config = config is not None or bool(configured)
+
+    def available(self) -> tuple[bool, str]:
+        return True, f"{self.config} (selected permission layer; local roots only)"
+
+    def _load(self) -> dict[str, Any]:
+        if not self.explicit_config:
+            jsonc = self.home / "opencode.jsonc"
+            if jsonc.exists():
+                raise SystemExit("OpenCode JSONC settings exist; select --opencode-config explicitly to avoid editing the wrong layer.")
+        data = load_json_settings(self.config)
+        permissions = data.get("permission", {})
+        if not isinstance(permissions, dict):
+            raise SystemExit("OpenCode permission shorthand requires explicit host review; no rewrite performed.")
+        rules = permissions.get("skill", {})
+        if isinstance(rules, str):
+            rules = {"*": rules}
+        if not isinstance(rules, dict) or any(not isinstance(k, str) or v not in ("allow", "deny", "ask") for k, v in rules.items()):
+            raise SystemExit("Unsupported OpenCode permission.skill rules.")
+        return data
+
+    @staticmethod
+    def _rules(data: dict[str, Any]) -> dict[str, str]:
+        permissions = data.get("permission", {})
+        value = permissions.get("skill", {})
+        default = permissions.get("*", "allow")
+        if default not in ("allow", "deny", "ask"):
+            raise SystemExit("Unsupported OpenCode global permission default.")
+        if isinstance(value, str):
+            return {"*": value}
+        # Do not move an explicit wildcard: the host resolves the last match.
+        return dict(value) if "*" in value else {"*": default, **value}
+
+    def discover(self) -> list[Skill]:
+        data = self._load()
+        rules = self._rules(data)
+        roots = [(self.home / "skills", "opencode-user", "user:opencode", SKILL_GLOB_FLAT)]
+        if custom := os.environ.get("OPENCODE_CONFIG_DIR"):
+            roots.append((Path(custom).expanduser() / "skills", "opencode-custom", "user:custom", SKILL_GLOB_FLAT))
+        for directory in (".opencode", ".claude", ".agents"):
+            roots.extend(project_skill_roots(self.cwd, directory, "opencode", SKILL_GLOB_FLAT, True))
+        for directory in (".claude", ".agents"):
+            roots.append((Path.home() / directory / "skills", "shared", "user:compatible", SKILL_GLOB_FLAT))
+        result = []
+        for item in scan_roots(self.name, roots):
+            permission = "allow"
+            for pattern, value in rules.items():
+                expression = re.escape(pattern).replace(r"\*", ".*").replace(r"\?", ".")
+                if re.fullmatch(expression, item.name):
+                    permission = value
+            tools = data.get("tools", {})
+            state = "off" if isinstance(tools, dict) and tools.get("skill") is False else {"allow": "on", "deny": "off", "ask": "unknown"}[permission]
+            result.append(Skill(**{**asdict(item), "state": state}))
+        return result
+
+    def mutate(self, action: str, targets: list[Skill], dry_run: bool, force: bool) -> dict[str, Any]:
+        require_binary_action(self.name, action)
+        if action == "disable" and not force and any(item.name in PROTECTED_NAMES for item in targets):
+            raise SystemExit("Protected skills require --force.")
+        if any(any(c in item.name for c in "*?") for item in targets):
+            raise SystemExit("Skill names containing permission wildcards cannot be targeted safely.")
+        data = self._load()
+        tools = data.get("tools", {})
+        if action == "enable" and isinstance(tools, dict) and tools.get("skill") is False:
+            return {"platform": self.name, "changed": False, "dry_run": dry_run,
+                    "blocked": [{"reason": "skill_tool_disabled", "config": str(self.config)}]}
+        before = json.dumps(data)
+        permissions = dict(data.get("permission", {}))
+        rules = self._rules(data)
+        for item in targets:
+            rules.pop(item.name, None)
+            rules[item.name] = "allow" if action == "enable" else "deny"
+        permissions["skill"] = rules
+        data["permission"] = permissions
+        changed = before != json.dumps(data)
+        backup = write_atomic(self.config, json.dumps(data, ensure_ascii=False, indent=2) + "\n") if changed and not dry_run else None
+        return {"platform": self.name, "action": action, "targets": sorted({item.name for item in targets}),
+                "changed": changed, "dry_run": dry_run, "config": str(self.config),
+                "backup": str(backup) if backup else None, "new_session_recommended": changed and not dry_run,
+                "state_scope": "selected permission.skill only; project/per-agent/tool policy may differ"}
+
+
 def adapters(args: argparse.Namespace) -> list[Any]:
     selected = PLATFORMS if args.platform == "all" else (args.platform,)
     result: list[Any] = []
@@ -1726,6 +1926,10 @@ def adapters(args: argparse.Namespace) -> list[Any]:
             result.append(OpenClawAdapter(args.cwd, args.openclaw_config))
         elif name == "antigravity":
             result.append(AntigravityAdapter(args.cwd, args.antigravity_config, args.antigravity_surface))
+        elif name == "gemini":
+            result.append(GeminiAdapter(args.cwd, args.gemini_config, args.gemini_scope))
+        elif name == "opencode":
+            result.append(OpenCodeAdapter(args.cwd, args.opencode_config))
         else:
             result.append(
                 HermesAdapter(args.cwd, args.hermes_config, args.hermes_scope)
@@ -1844,6 +2048,9 @@ def audit_payload(
             parked = {item.config_key for item in adapter._entries(adapter.disabled_root, "off")}
             for identity in sorted(active & parked):
                 add(adapter.name, "warning", "parking_collision", f"{identity} exists in both active and parked roots.")
+        if adapter.name in {"gemini", "opencode"}:
+            add(adapter.name, "warning", "selected_layer_only",
+                "Local skill roots and one configuration layer only; extension, system and per-agent policies require host verification.")
     return {
         "schema_version": 1,
         "evidence_scope": "local configuration and installed metadata; no live prompt verification",
@@ -1851,6 +2058,122 @@ def audit_payload(
         "skills": inventories,
         "summary": {level: sum(item["severity"] == level for item in findings) for level in ("error", "warning", "info")},
     }
+
+
+def collect_catalog(selected: list[Any], rules: dict[str, list[str]]) -> dict[str, Any]:
+    rows, errors = [], []
+    for adapter in selected:
+        try:
+            for item in apply_group_rules(adapter.discover(), rules):
+                rows.append({**asdict(item), "description": skill_description(item)})
+        except (SystemExit, OSError, ValueError, subprocess.TimeoutExpired):
+            errors.append({"platform": adapter.name, "code": "discovery_failed",
+                           "message": "Configuration or discovery failed; inspect this host locally."})
+    return {"schema_version": 1, "generated_at": datetime.now(timezone.utc).isoformat(),
+            "evidence_scope": "inventory snapshot; not live host visibility", "skills": rows, "errors": errors}
+
+
+def read_index(path: Path) -> dict[str, Any]:
+    try:
+        if path.stat().st_size > 32 * 1024 * 1024:
+            raise ValueError("oversized")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("schema_version") != 1:
+            raise ValueError("schema")
+        if not isinstance(data.get("generated_at"), str) or not isinstance(data.get("skills"), list):
+            raise ValueError("shape")
+        if not isinstance(data.get("errors"), list):
+            raise ValueError("errors")
+        if any(not isinstance(row, dict) or not isinstance(row.get("platform"), str) for row in data["errors"]):
+            raise ValueError("error shape")
+        if not isinstance(data.get("evidence_scope"), str):
+            raise ValueError("scope")
+        for row in data["skills"]:
+            if not isinstance(row, dict) or any(not isinstance(row.get(k), str) for k in
+                    ("platform", "name", "path", "group", "origin", "state", "description")):
+                raise ValueError("skill")
+            if row["platform"] not in PLATFORMS:
+                raise ValueError("platform")
+        return data
+    except (OSError, ValueError, TypeError):
+        raise SystemExit("Invalid or unreadable inventory index; rebuild it with index --output.") from None
+
+
+def search_catalog(catalog: dict[str, Any], query: str, limit: int,
+                   aliases: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    query = query.strip().casefold()
+    if not query:
+        raise SystemExit("Search query must not be empty.")
+    terms = query.split()
+    ranked = []
+    for row in catalog["skills"]:
+        fields = [("name", 8), ("config_key", 8), ("description", 4), ("group", 2), ("path", 1)]
+        values = [(str(row.get(key, "")).casefold(), weight, key) for key, weight in fields]
+        matched, score = set(), 0
+        for term in terms:
+            alternatives = [term, *((aliases or {}).get(term, []))]
+            hits = [(weight, key) for value, weight, key in values
+                    if any(word.casefold() in value for word in alternatives)]
+            if not hits:
+                break
+            score += max(weight for weight, _ in hits)
+            matched.update(key for _, key in hits)
+        else:
+            if query in {row["name"].casefold(), str(row.get("config_key", "")).casefold()}:
+                score += 100
+            ranked.append({**row, "score": score, "matched_fields": sorted(matched)})
+    ranked.sort(key=lambda row: (-row["score"], row["platform"], row["name"], row["path"]))
+    return {"schema_version": 1, "query": query, "generated_at": catalog["generated_at"],
+            "evidence_scope": catalog["evidence_scope"], "total": len(ranked),
+            "truncated": limit > 0 and len(ranked) > limit,
+            "results": ranked[:limit] if limit else ranked, "errors": catalog["errors"]}
+
+
+def load_aliases(path: Path | None) -> dict[str, list[str]]:
+    if path is None:
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError()
+        if any(not isinstance(key, str) or not key.strip() or not isinstance(values, list)
+               or any(not isinstance(v, str) or not v.strip() for v in values)
+               for key, values in data.items()):
+            raise ValueError()
+        return {key.casefold(): values for key, values in data.items()}
+    except (OSError, ValueError):
+        raise SystemExit("Aliases must be a JSON object mapping words to nonempty string arrays.") from None
+
+
+REFRESH_GUIDANCE = {
+    "codex": "Restart Codex after config.toml edits; verify the skill in the new session.",
+    "claude": "Open a new Claude session and verify /skills; project/managed and plugin controls may override this file.",
+    "copilot": "Open a new Copilot CLI session and verify /skills; repository disables can still block a user enable.",
+    "openclaw": "Verify the next-turn skill catalog in the target agent; eligibility and allowlists still apply.",
+    "hermes": "Start a new Hermes session in the selected platform; verify dependencies and global disables.",
+    "antigravity": "Reload the selected surface and verify the skill; workspace/plugin copies are outside parking scope.",
+    "gemini": "Restart Gemini CLI after settings-file edits, then verify /skills list. /skills reload refreshes discovery, not proof of config reload.",
+    "opencode": "Start a new OpenCode session and verify skill access; project, per-agent and tool permissions still apply.",
+}
+
+
+def inspect_targets(adapter: Any, targets: list[Skill]) -> dict[str, Any]:
+    preview = adapter.mutate("enable", targets, True, False)
+    layers = []
+    folder = {"claude": ".claude", "copilot": ".copilot", "gemini": ".gemini"}.get(adapter.name)
+    if folder:
+        for parent in (adapter.cwd.resolve(), *adapter.cwd.resolve().parents):
+            for name in ("settings.json", "settings.local.json"):
+                path = parent / folder / name
+                if path.exists() and path.resolve() != adapter.config.resolve():
+                    layers.append(str(path))
+            if (parent / ".git").exists():
+                break
+    return {"platform": adapter.name, "targets": [asdict(item) for item in targets],
+            "enable_preview": preview, "live_verified": False,
+            "additional_config_layers": layers,
+            "refresh_guidance": REFRESH_GUIDANCE[adapter.name],
+            "note": "Preview only. Enable by exact selector, refresh the host, then verify invocation there."}
 
 
 def load_preset(path: Path, name: str, platform: str) -> dict[str, list[str]]:
@@ -1895,6 +2218,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Use documented paths (default); name requires host-specific verification.")
     parser.add_argument("--claude-config", type=Path)
     parser.add_argument("--copilot-config", type=Path)
+    parser.add_argument("--gemini-config", type=Path)
+    parser.add_argument("--gemini-scope", choices=("user", "workspace"), default="user")
+    parser.add_argument("--opencode-config", type=Path)
     parser.add_argument("--openclaw-config", type=Path)
     parser.add_argument("--hermes-config", type=Path)
     parser.add_argument(
@@ -1939,7 +2265,17 @@ def build_parser() -> argparse.ArgumentParser:
     add_command_json(audit)
     search = subparsers.add_parser("search")
     search.add_argument("query")
+    search.add_argument("--limit", type=int, default=20, help="Maximum results; 0 returns all.")
+    search.add_argument("--index", type=Path, help="Search an offline snapshot without invoking host CLIs.")
+    search.add_argument("--aliases", type=Path, help="JSON query word to synonym arrays, including translations.")
+    search.add_argument("--report", action="store_true", help="Return results, errors, totals and snapshot metadata together.")
     add_command_json(search)
+    index = subparsers.add_parser("index", help="Export a searchable metadata snapshot, including disabled skills.")
+    index.add_argument("--output", type=Path, required=True)
+    add_command_json(index)
+    inspect = subparsers.add_parser("inspect", help="Preview exact activation and host refresh requirements without writes.")
+    inspect.add_argument("selectors", nargs="+")
+    add_command_json(inspect)
     reconcile = subparsers.add_parser(
         "reconcile",
         help="Normalize Codex Skill configuration without modifying installed files.",
@@ -1992,6 +2328,13 @@ def emit(value: Any, as_json: bool) -> None:
             print(f"{row['platform']:12} {row['severity']:7} {row['code']}: {row['detail']} {row['path']}")
         print(f"summary={value['summary']}")
         return
+    if isinstance(value, dict) and "results" in value and "total" in value:
+        emit(value["results"], False)
+        print(f"total={value['total']} truncated={value['truncated']} generated_at={value['generated_at']}")
+        print(f"evidence_scope={value['evidence_scope']}")
+        for error in value["errors"]:
+            print(f"error={error}")
+        return
     if isinstance(value, list):
         for row in value:
             key = row.get("config_key", "")
@@ -2005,6 +2348,8 @@ def emit(value: Any, as_json: bool) -> None:
                 f"{row['platform']:8} {row['state']:10} {label} "
                 f"[{row['group']}] {row['path']}"
             )
+            if row.get("description"):
+                print("  " + " ".join(row["description"].split())[:240])
         print(f"matches={len(value)}")
         return
     for key, item in value.items():
@@ -2023,19 +2368,33 @@ def main() -> int:
         payload = audit_payload(selected, rules)
         emit(payload, args.json)
         return int(any(row["severity"] == "error" or (args.strict and row["severity"] == "warning") for row in payload["findings"]))
+    if args.command == "index":
+        catalog = collect_catalog(selected, rules)
+        # Index files contain private paths/descriptions. Never overwrite an existing file.
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            handle = os.open(args.output, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            raise SystemExit("Index output already exists; choose a new snapshot path.") from None
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(catalog, stream, ensure_ascii=False, indent=2)
+        emit({"output": str(args.output.resolve()), "skills": len(catalog["skills"]),
+              "errors": catalog["errors"], "generated_at": catalog["generated_at"]}, args.json)
+        return int(bool(catalog["errors"]))
     if args.command == "search":
-        query = args.query.lower()
-        rows = [
-            asdict(item)
-            for adapter in selected
-            for item in apply_group_rules(adapter.discover(), rules)
-            if query in item.name.lower()
-            or query in item.identity.lower()
-            or query in item.group.lower()
-            or query in item.path.lower()
-        ]
-        emit(rows, args.json)
-        return 0
+        if args.limit < 0:
+            raise SystemExit("--limit must be nonnegative.")
+        catalog = read_index(args.index) if args.index else collect_catalog(selected, rules)
+        if args.platform != "all":
+            catalog["skills"] = [row for row in catalog["skills"] if row["platform"] == args.platform]
+            catalog["errors"] = [row for row in catalog["errors"] if row.get("platform") == args.platform]
+        payload = search_catalog(catalog, args.query, args.limit, load_aliases(args.aliases))
+        if args.index:
+            payload["evidence_scope"] = "offline inventory snapshot; rescan before mutation; not live host visibility"
+        emit(payload if args.report or not args.json else payload["results"], args.json)
+        if args.json and not args.report:
+            print(json.dumps({key: value for key, value in payload.items() if key != "results"}, ensure_ascii=False), file=sys.stderr)
+        return int(bool(payload["errors"]))
     if args.platform == "all":
         raise SystemExit("Mutations require an explicit --platform.")
     adapter = selected[0]
@@ -2045,6 +2404,10 @@ def main() -> int:
         emit(adapter.reconcile(args.dry_run), args.json)
         return 0
     inventory = apply_group_rules(adapter.discover(), rules)
+    if args.command == "inspect":
+        payload = inspect_targets(adapter, resolve_selectors(args.selectors, inventory))
+        emit(payload, args.json)
+        return int(bool(payload["enable_preview"].get("blocked")))
     if args.command == "preset":
         preset = load_preset(args.file, args.name, args.platform)
         resolved = {
@@ -2061,14 +2424,19 @@ def main() -> int:
         # Validate every operation before the first side effect.
         for action in ("disable", "enable"):
             if resolved[action]:
-                adapter.mutate(action, resolved[action], True, args.force)
+                preview = adapter.mutate(action, resolved[action], True, args.force)
+                if preview.get("blocked"):
+                    emit(preview, args.json)
+                    return 1
         results = []
         for action in ("disable", "enable"):
             if not resolved[action]:
                 continue
-            results.append(
-                adapter.mutate(action, resolved[action], args.dry_run, args.force)
-            )
+            outcome = adapter.mutate(action, resolved[action], args.dry_run, args.force)
+            results.append(outcome)
+            if outcome.get("blocked"):
+                emit({"preset": args.name, "results": results, "partial": True}, args.json)
+                return 1
         emit({"preset": args.name, "results": results}, args.json)
         return 0
     action = args.state if args.command == "set" else args.command
@@ -2086,8 +2454,10 @@ def main() -> int:
             for name in args.selectors
         ]
     result = adapter.mutate(action, targets, args.dry_run, args.force)
+    result["live_verified"] = False
+    result["refresh_guidance"] = REFRESH_GUIDANCE[adapter.name]
     emit(result, args.json)
-    return 0
+    return int(bool(result.get("blocked")))
 
 
 if __name__ == "__main__":

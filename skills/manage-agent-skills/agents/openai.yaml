@@ -3,4 +3,4 @@ interface:
   short_description: "Toggle skills across major coding agents"
   default_prompt: "Use $manage-agent-skills to audit and safely toggle my installed agent skills."
 policy:
-  allow_implicit_invocation: false
+  allow_implicit_invocation: true

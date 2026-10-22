@@ -43,7 +43,7 @@ Rules:
 - Nothing is grouped by name out of the box. Group patterns are `fnmatch`
   style and are matched, case-insensitively, against the skill's display name,
   its host identifier, and its directory name.
-- Platform keys are `codex`, `claude`, `copilot`, `openclaw`, `hermes`, or `antigravity`.
+- Platform keys are `codex`, `claude`, `copilot`, `openclaw`, `hermes`, `antigravity`, `gemini`, or `opencode`.
 - Explicit enables win: overlapping disable targets are removed before any write.
   All remaining actions are preflighted before mutation. A later runtime failure
   can still leave partial changes; presets are not transactions. Unknown action

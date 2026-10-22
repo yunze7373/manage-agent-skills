@@ -16,7 +16,7 @@ Built by [Han (@yunze7373)](https://github.com/yunze7373) ·
 [![CI](https://github.com/yunze7373/manage-agent-skills/actions/workflows/ci.yml/badge.svg)](https://github.com/yunze7373/manage-agent-skills/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Agent Skills](https://img.shields.io/badge/Agent%20Skills-compatible-111827)](https://agentskills.io/)
-[![Hosts](https://img.shields.io/badge/hosts-6-8B5CF6)](#host-platform-support)
+[![Hosts](https://img.shields.io/badge/adapters-8-8B5CF6)](#host-platform-support)
 [![OS](https://img.shields.io/badge/OS-Windows%20%7C%20macOS%20%7C%20Linux-2563EB)](#operating-system-support)
 [![No daemon](https://img.shields.io/badge/daemon-none-10B981)](#safety-by-design)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -33,6 +33,10 @@ Built by [Han (@yunze7373)](https://github.com/yunze7373) ·
 ---
 
 ## Why
+
+New in v1.1.0: description search,
+bounded ranked results, offline inventory snapshots, activation inspection, and
+scoped Gemini CLI/OpenCode adapters. See [implementation and validation](docs/improvements-2026-10-23.md).
 
 Agent Skills are increasingly portable: the same `SKILL.md` can work in
 multiple agents. Skill enablement is not portable. Every host discovers skills
@@ -80,6 +84,8 @@ into another operating system's path syntax.
 | OpenClaw | Native inventory with workspace/user fallback | `skills.entries.<key>.enabled` through the native CLI | ✅ |
 | Hermes Agent | `$HERMES_HOME/skills` | Global or per-platform disable lists | ✅ |
 | Antigravity App/IDE or CLI | Surface-specific global root | Manager-owned directory parking | Scoped |
+| Gemini CLI | User/workspace `.gemini/skills` and `.agents/skills` | Selected `skills.disabled` settings | Scoped |
+| OpenCode | User/project and compatible local roots | Selected `permission.skill` rules | Scoped |
 | Claude Desktop / Cowork | Outside local adapter scope | Host UI | Not implemented |
 
 Claude Desktop and Cowork are outside this manager's local adapter scope.
@@ -150,6 +156,8 @@ doctor
 status
 audit [--strict]                # Read-only metadata and compatibility findings
 search QUERY
+index --output FILE            # Private, dated metadata snapshot
+inspect SELECTOR...            # Read-only activation preview and refresh guidance
 enable SELECTOR...
 disable SELECTOR...
 reconcile                         # Codex: normalize stable configuration rules
@@ -166,6 +174,57 @@ output. Both forms are equivalent:
 python <skillctl> --platform all --json status
 python <skillctl> --platform all status --json
 ```
+
+### Find and activate expertise on demand
+
+Search includes descriptions and disabled skills. Space-separated words must
+all match; exact names rank first. This is lexical retrieval, not semantic search.
+The default maximum is 20 results; `--limit 0` explicitly requests all results.
+
+```text
+python <skillctl> --platform all search "invoice" --limit 5 --report --json
+python <skillctl> --platform all search "发票" --aliases search-aliases.example.json --report --json
+python <skillctl> --platform codex inspect exact-skill-name --json
+python <skillctl> --platform codex enable exact-skill-name --dry-run
+python <skillctl> --platform codex enable exact-skill-name
+```
+
+`inspect` performs no writes. It previews activation, lists known extra settings
+layers, and gives host refresh instructions. A disabled Codex parent plugin now
+returns a structured blocker and nonzero exit without changing skill rules.
+Refresh and verify in the host before claiming that a configured skill is usable.
+The manager never starts a model session or restarts your host automatically.
+
+For repeated low-latency lookup, export a private snapshot to a **new** path:
+
+```text
+python <skillctl> --platform all index --output catalog.skill-index.json
+python <skillctl> search "invoice" --index catalog.skill-index.json --limit 5 --report --json
+```
+
+Offline searches invoke no host CLIs. Snapshots include generation time, paths,
+descriptions, disabled entries and any discovery errors. They do not update
+automatically; create a fresh snapshot after installing/updating skills. Mutation
+commands always rescan and do not accept `--index`. Keep snapshots private.
+
+One broken adapter no longer discards healthy search results. Partial results
+return exit code 1. `--report --json` returns a results/errors/total envelope;
+legacy `search --json` retains its array, with diagnostics on stderr. Results
+are bounded to reduce tool-output size; this is not measured model-token savings.
+
+### Gemini CLI and OpenCode
+
+```text
+python <skillctl> --platform gemini --gemini-scope workspace disable demo --dry-run
+python <skillctl> --platform opencode --opencode-config /absolute/opencode.jsonc enable demo --dry-run
+```
+
+Gemini uses `skills.disabled` in user settings by default; workspace scope uses
+`<cwd>/.gemini/settings.json`. `GEMINI_CLI_HOME` relocates its user home. OpenCode
+uses exact `permission.skill` allow/deny rules, preserving wildcard order and
+unrelated permission settings. `OPENCODE_CONFIG` and `XDG_CONFIG_HOME` are honored;
+JSONC requires explicit file selection. Both adapters cover local roots and one
+settings layer, not all extensions, managed settings or effective live policies.
 
 ### Audit and compatibility
 
@@ -490,7 +549,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the full checklist.
 
 ## Project status
 
-The current release is **v1.0.1**, aligned across GitHub, ClawHub, and SkillHub.
+The source version is **v1.1.0**. See GitHub Releases and the registry pages for publication status.
 Check the CLI with `python <skillctl> --version`.
 The public API, preset schema, and supported host versions may evolve over time.
 

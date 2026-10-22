@@ -1,0 +1,7 @@
+{
+  "发票": ["invoice", "receipt"],
+  "表格": ["spreadsheet", "excel"],
+  "演示": ["presentation", "slides"],
+  "部署": ["deploy", "deployment"],
+  "检索": ["search", "retrieval"]
+}

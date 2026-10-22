@@ -15,6 +15,8 @@ none of these adapters measures the current model prompt or actual token savings
 | Hermes | `$HERMES_HOME/skills`; selected YAML | Global/per-platform disable lists | External skill directories, profiles, environment/app gates are not fully enumerated. |
 | Antigravity App/IDE | Selected global `~/.gemini/config/skills` | Directory parking | Workspace, legacy IDE and plugin roots are not managed. |
 | Antigravity CLI | `--antigravity-surface cli`: `~/.gemini/antigravity-cli/skills` | Directory parking | Plugin controls belong to `agy plugin`; older releases may use different paths. |
+| Gemini CLI (v1.1.0) | Local user/workspace/shared roots; selected JSON/JSONC | `skills.disabled` | Built-in, extension and other settings layers are not merged. |
+| OpenCode (v1.1.0) | Global/project/compatible roots; selected JSON/JSONC | `permission.skill` allow/deny | Remote, inline, per-agent and other layers are not merged. |
 
 All filesystem paths use the current OS's native rules. Use the absolute path
 printed by `search`; paths are not translated between Windows, macOS and Linux.
@@ -106,7 +108,28 @@ Workspace/plugin copies can remain active. No context visibility is claimed.
 
 [Gemini CLI](https://geminicli.com/docs/cli/skills/) is a separate host with native
 skill management and user/workspace scopes. Do not treat it as Antigravity.
-There is no Gemini adapter in this release; use its native `/skills` commands.
+Version 1.1.0 adds a separate Gemini adapter; v1.0.1 did not include it.
+It discovers user/workspace `.gemini/skills` and `.agents/skills`, honors
+`GEMINI_CLI_HOME`, and edits `skills.disabled` in one selected JSON/JSONC file.
+`--gemini-scope workspace` uses `<cwd>/.gemini/settings.json`. Global
+`skills.enabled=false` in that file blocks enable. Built-in/extension roots,
+system configuration and trust gates are not replicated. Settings-file edits
+require a restart according to the [configuration reference](https://geminicli.com/docs/reference/configuration/);
+`/skills reload` alone is not evidence that an externally edited config was read.
+
+## OpenCode (v1.1.0 adapter; checked 2026-10-23)
+
+The [skills contract](https://opencode.ai/docs/skills/) and
+[permissions reference](https://opencode.ai/docs/permissions/) define
+`permission.skill` allow/deny/ask. The adapter manages exact names in one selected
+config and preserves last-matching-rule order. `ask` is represented as unknown
+invocability, not disabled. It discovers global/project skills and `.claude`/
+`.agents` compatibility roots. `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`, and the
+`OPENCODE_CONFIG_DIR` skill root are honored. Select JSONC explicitly with
+`--opencode-config`. Permission-wide string shorthand is refused rather than
+rewritten; skill-only shorthand is safely retained as a wildcard default.
+Remote, inline, managed, project and per-agent configuration may override this
+selected layer. Local configuration is not live verification or version certification.
 
 ## Other surfaces
 
