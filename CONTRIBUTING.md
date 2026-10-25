@@ -13,3 +13,5 @@ For a new platform adapter:
 5. Add isolated tests that do not touch the developer's real agent settings.
 
 Run the unit tests and the skill validator before submitting changes.
+
+For the complete agent-executable workflow, follow [Add a platform adapter](skills/manage-agent-skills/references/add-platform.md). It is included in the distributed skill, along with per-platform guides.

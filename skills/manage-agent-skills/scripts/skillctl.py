@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "1.1.2"
+VERSION = "1.2.0"
 CODEX_BEGIN = "# BEGIN MANAGE_AGENT_SKILLS:CODEX"
 CODEX_END = "# END MANAGE_AGENT_SKILLS:CODEX"
 CODEX_LEGACY_BEGIN = "# BEGIN CODEX_SKILL_MANAGER"
@@ -1941,10 +1941,10 @@ def adapters(args: argparse.Namespace) -> list[Any]:
             result.append(GeminiAdapter(args.cwd, args.gemini_config, args.gemini_scope))
         elif name == "opencode":
             result.append(OpenCodeAdapter(args.cwd, args.opencode_config))
+        elif name == "hermes":
+            result.append(HermesAdapter(args.cwd, args.hermes_config, args.hermes_scope))
         else:
-            result.append(
-                HermesAdapter(args.cwd, args.hermes_config, args.hermes_scope)
-            )
+            raise SystemExit(f"Unsupported platform: {name}; use adapter-guide for extension instructions.")
     return result
 
 
@@ -2234,6 +2234,27 @@ def load_preset(path: Path, name: str, platform: str) -> dict[str, list[str]]:
     return result
 
 
+def adapter_guide(platform: str | None = None) -> dict[str, Any]:
+    """Resolve packaged documentation only; no home/config or host discovery."""
+    root = Path(__file__).resolve().parents[1]
+    def guide_path(relative: str) -> str:
+        path = root / relative
+        if not path.is_file():
+            raise SystemExit(f"Incomplete installation: missing {relative}; reinstall the full ZIP.")
+        return str(path)
+    addition = guide_path("references/add-platform.md")
+    if platform is None:
+        return {"version": VERSION, "adapters": [
+            {"platform": name, "guide": guide_path(f"references/adapters/{name}.md")}
+            for name in PLATFORMS], "addition_guide": addition}
+    target = platform.strip().lower()
+    supported = target in PLATFORMS
+    return {"platform": target, "supported": supported,
+            "guide": guide_path(f"references/adapters/{target}.md") if supported else addition,
+            "next_action": "read_adapter" if supported else "follow_addition_guide",
+            "host_detected": False}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Audit and toggle installed Agent Skills without deleting files."
@@ -2288,6 +2309,10 @@ def build_parser() -> argparse.ArgumentParser:
         )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
+    guide = subparsers.add_parser("adapter-guide", help="Resolve platform or addition guide without scanning hosts.")
+    guide.add_argument("target", nargs="?")
+    add_command_json(guide)
+
     doctor = subparsers.add_parser("doctor")
     add_command_json(doctor)
     status = subparsers.add_parser("status")
@@ -2393,6 +2418,9 @@ def emit(value: Any, as_json: bool) -> None:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.command == "adapter-guide":
+        emit(adapter_guide(args.target), args.json)
+        return 0
     selected = adapters(args)
     rules = load_group_rules(args.groups)
     if args.command in {"doctor", "status"}:

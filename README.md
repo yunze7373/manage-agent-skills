@@ -34,11 +34,11 @@ Built by [Han (@yunze7373)](https://github.com/yunze7373) ·
 
 ## 上传到 Claude（claude.ai / Desktop）
 
-当前版本 **v1.1.2**。从 [GitHub Release](https://github.com/yunze7373/manage-agent-skills/releases/tag/v1.1.2)
-下载 `manage-agent-skills-v1.1.2.zip`，或在仓库执行：
+当前版本 **v1.2.0**。从 [GitHub Release](https://github.com/yunze7373/manage-agent-skills/releases/tag/v1.2.0)
+下载 `manage-agent-skills-v1.2.0.zip`，或在仓库执行：
 
 ```text
-python scripts/release.py package v1.1.2 --output-dir dist/v1.1.2
+python scripts/release.py package v1.2.0 --output-dir dist/v1.2.0
 ```
 
 必须上传 `dist/vX.Y.Z/manage-agent-skills-vX.Y.Z.zip`，保留文件夹结构，
@@ -62,7 +62,7 @@ manage-agent-skills/
 `anthropic-skills:manage-agent-skills`，与官方技能位于同一个 skills-plugin 缓存。
 这是该 Desktop 版本的装载/命名空间行为，**不代表作者是 Anthropic**；作者是 Han / yunze7373。
 官方[插件技能文档](https://code.claude.com/docs/en/skills)解释插件命名空间，
-但未承诺该私有缓存路径和 `anthropic-skills` 前缀始终不变。
+当前官方文档已明确将 `anthropic-skills` 保留给 claude.ai 同步技能；私有缓存路径仍不视为稳定接口。
 
 调用时先检查同目录脚本，缺失即提示“安装不完整，请重新上传完整 zip”并停止。
 已有旧上传不会自动获得新自检，需在 Claude 中重新上传。运行 `doctor --json` 查看执行器 `version`；
@@ -604,3 +604,25 @@ The public API, preset schema, and supported host versions may evolve over time.
 ## License
 
 Released under the [MIT License](LICENSE). Copyright © 2026 yunze7373.
+
+
+## 平台适配与自适应扩展
+
+技能入口只保留通用流程。Agent 先区分执行宿主、运行位置和管理目标，
+再按索引读取 `references/adapters/<platform>.md`；用户指定的目标优先。
+模型品牌、安装目录或存在某个 CLI 都不能独自证明当前宿主身份。
+
+```text
+python skills/manage-agent-skills/scripts/skillctl.py adapter-guide --json
+python skills/manage-agent-skills/scripts/skillctl.py adapter-guide gemini --json
+python skills/manage-agent-skills/scripts/skillctl.py adapter-guide new-host --json
+```
+
+该命令不扫描用户配置。已支持的平台返回专属指南；未知平台返回
+[添加平台向导](skills/manage-agent-skills/references/add-platform.md)。
+任何具备编辑和测试能力的 agent 都可以按向导调研官方契约，在开发副本中添加
+自己的 Python Adapter、CLI 注册、平台指南及隔离测试。没有原生启停能力的平台
+先提供只读支持，不伪造开关。不具备开发工具的 agent 应提供明确的实现计划与限制。
+
+这项自适应能力是有验证流程的源码扩展，不是运行时自动下载代码、猜测配置或
+改写已安装技能。新增指南本身不代表已完成支持；发布和安装沿用各自的授权与校验流程。

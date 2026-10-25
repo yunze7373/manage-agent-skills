@@ -198,6 +198,7 @@ def package(tag: str, output_dir: Path) -> tuple[Path, Path]:
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_STORED) as bundle:
         for path, archive_name in sorted(packaged_files(), key=lambda item: item[1]):
             info = zipfile.ZipInfo(archive_name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.create_system = 3  # Stable Unix metadata on every build OS.
             info.compress_type = zipfile.ZIP_STORED
             info.external_attr = 0o100644 << 16
             bundle.writestr(info, path.read_bytes().replace(b"\r\n", b"\n"))
@@ -234,6 +235,9 @@ def fetch(
                 return 404, None
             fail(f"registry returned HTTP {error.code} for {url}")
         except (urllib.error.URLError, TimeoutError) as error:
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+                continue
             fail(f"could not verify registry state: {error}")
     fail("registry rate limit remained after retries")
 

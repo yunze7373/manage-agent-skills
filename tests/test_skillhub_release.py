@@ -21,8 +21,8 @@ class SkillHubTests(unittest.TestCase):
     def test_prepared_payload_changes_only_skill_frontmatter(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            archive, checksum = release.package("v1.1.2", root)
-            hub.prepare("v1.1.2", archive, checksum, root / "payload")
+            archive, checksum = release.package("v1.2.0", root)
+            hub.prepare("v1.2.0", archive, checksum, root / "payload")
             with ZipFile(archive) as bundle:
                 changed = []
                 omitted = []
@@ -40,27 +40,27 @@ class SkillHubTests(unittest.TestCase):
                 old_body = bundle.read("manage-agent-skills/SKILL.md").split(b"---", 2)[2]
             new_text = (root / "payload/SKILL.md").read_bytes()
             self.assertEqual(new_text.split(b"---", 2)[2], old_body)
-            self.assertIn(b'version: "1.1.2"', new_text)
+            self.assertIn(b'version: "1.2.0"', new_text)
 
     def test_bad_checksum_rejects_before_writing_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            archive, checksum = release.package("v1.1.2", root)
+            archive, checksum = release.package("v1.2.0", root)
             archive.write_bytes(b"tampered")
             with self.assertRaisesRegex(SystemExit, "checksum mismatch"):
-                hub.prepare("v1.1.2", archive, checksum, root / "payload")
+                hub.prepare("v1.2.0", archive, checksum, root / "payload")
             self.assertFalse((root / "payload").exists())
 
     def test_other_extensionless_files_rejected_before_writing_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            archive, checksum = release.package("v1.1.2", root)
+            archive, checksum = release.package("v1.2.0", root)
             with ZipFile(archive, "a") as bundle:
                 bundle.writestr("manage-agent-skills/NOTICE", b"unsupported extensionless file")
             digest = hashlib.sha256(archive.read_bytes()).hexdigest()
             checksum.write_text(f"{digest}  {archive.name}\n", encoding="ascii")
             with self.assertRaisesRegex(SystemExit, "unsupported extensionless file: NOTICE"):
-                hub.prepare("v1.1.2", archive, checksum, root / "payload")
+                hub.prepare("v1.2.0", archive, checksum, root / "payload")
             self.assertFalse((root / "payload").exists())
 
     @mock.patch.object(hub, "fetch_json")
@@ -77,20 +77,20 @@ class SkillHubTests(unittest.TestCase):
         details.return_value = self.details
         fetch.return_value = (200, {"user": {"handle": "wrong-owner"}})
         with self.assertRaisesRegex(SystemExit, "does not own"):
-            hub.check("v1.1.2", Path("unused"))
+            hub.check("v1.2.0", Path("unused"))
 
     @mock.patch.object(hub, "details")
     def test_downgrade_rejected(self, details):
-        self.details["latestVersion"]["version"] = "1.1.3"
+        self.details["latestVersion"]["version"] = "1.2.1"
         details.return_value = self.details
         with self.assertRaisesRegex(SystemExit, "downgrade"):
-            hub.check("v1.1.2", Path("unused"), authenticate=False)
+            hub.check("v1.2.0", Path("unused"), authenticate=False)
 
     @mock.patch.object(hub, "details")
     @mock.patch.object(hub, "fetch")
     def test_exact_archive_required_for_skip(self, fetch, details):
-        self.details["latestVersion"]["version"] = "1.1.2"
-        self.details["skill"]["tags"]["latest"] = "1.1.2"
+        self.details["latestVersion"]["version"] = "1.2.0"
+        self.details["skill"]["tags"]["latest"] = "1.2.0"
         details.return_value = self.details
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -99,37 +99,37 @@ class SkillHubTests(unittest.TestCase):
             with ZipFile(out, "w") as bundle:
                 bundle.writestr("SKILL.md", b"skill")
             fetch.return_value = (200, out.getvalue())
-            self.assertEqual(hub.check("v1.1.2", root, authenticate=False), "skip")
+            self.assertEqual(hub.check("v1.2.0", root, authenticate=False), "skip")
             (root / "SKILL.md").write_bytes(b"changed")
             with self.assertRaisesRegex(SystemExit, "differs"):
-                hub.check("v1.1.2", root, authenticate=False)
+                hub.check("v1.2.0", root, authenticate=False)
 
     @mock.patch.object(hub, "details")
     @mock.patch.object(hub, "fetch")
     def test_registry_sidecar_must_match_exact_version(self, fetch, details):
         import json
-        self.details["latestVersion"]["version"] = "1.1.2"
-        self.details["skill"]["tags"]["latest"] = "1.1.2"
+        self.details["latestVersion"]["version"] = "1.2.0"
+        self.details["skill"]["tags"]["latest"] = "1.2.0"
         details.return_value = self.details
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "SKILL.md").write_bytes(b"skill")
-            for version, valid in [("1.1.2", True), ("0.1.5", False)]:
+            for version, valid in [("1.2.0", True), ("0.1.5", False)]:
                 out = io.BytesIO()
                 with ZipFile(out, "w") as bundle:
                     bundle.writestr("SKILL.md", b"skill")
                     bundle.writestr("_meta.json", json.dumps({"slug": hub.SLUG, "version": version}))
                 fetch.return_value = (200, out.getvalue())
                 if valid:
-                    self.assertEqual(hub.check("v1.1.2", root, authenticate=False), "skip")
+                    self.assertEqual(hub.check("v1.2.0", root, authenticate=False), "skip")
                 else:
                     with self.assertRaisesRegex(SystemExit, "different release"):
-                        hub.check("v1.1.2", root, authenticate=False)
+                        hub.check("v1.2.0", root, authenticate=False)
 
     @mock.patch.object(hub, "details")
     @mock.patch.object(hub, "fetch")
     def test_submitted_review_version_is_not_republished(self, fetch, details):
-        self.details["skill"]["tags"]["latest"] = "1.1.2"
+        self.details["skill"]["tags"]["latest"] = "1.2.0"
         details.return_value = self.details
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -138,24 +138,24 @@ class SkillHubTests(unittest.TestCase):
             with ZipFile(out, "w") as bundle:
                 bundle.writestr("SKILL.md", b"skill")
             fetch.return_value = (200, out.getvalue())
-            self.assertEqual(hub.check("v1.1.2", root, authenticate=False), "submitted")
+            self.assertEqual(hub.check("v1.2.0", root, authenticate=False), "submitted")
 
     @mock.patch.object(hub, "details")
     @mock.patch.object(hub, "check", return_value="submitted")
     def test_verification_reports_pending_review_without_retry(self, check, details):
         details.return_value = self.details
-        hub.verify("v1.1.2", Path("unused"))
-        check.assert_called_once_with("v1.1.2", Path("unused"), authenticate=False)
+        hub.verify("v1.2.0", Path("unused"))
+        check.assert_called_once_with("v1.2.0", Path("unused"), authenticate=False)
 
     @mock.patch.object(hub.time, "monotonic", return_value=10)
     @mock.patch.object(hub, "check", return_value="publish")
     def test_missing_public_version_cannot_pass_verification(self, check, clock):
         with self.assertRaisesRegex(SystemExit, "did not become publicly available"):
-            hub.verify("v1.1.2", Path("unused"), timeout=0)
+            hub.verify("v1.2.0", Path("unused"), timeout=0)
 
     @mock.patch.object(hub.time, "sleep")
     @mock.patch.object(hub, "check", side_effect=["publish", "skip"])
     def test_verification_waits_for_public_archive(self, check, sleep):
-        hub.verify("v1.1.2", Path("unused"))
+        hub.verify("v1.2.0", Path("unused"))
         self.assertEqual(check.call_count, 2)
         sleep.assert_called_once()
