@@ -152,6 +152,45 @@ def clawhub_scan_exists(version: str) -> bool:
     fail("ClawHub submission state is unknown; refusing to publish or retry this version")
 
 
+def validate_claude_zip(archive: Path) -> None:
+    """Validate the upload structure plus this skill's required runtime payload."""
+    import yaml
+
+    with zipfile.ZipFile(archive) as bundle:
+        names = bundle.namelist()
+        if len(names) != len(set(names)):
+            fail("duplicate ZIP members")
+        for name in names:
+            parts = name.rstrip("/").split("/")
+            if (len(parts) < 2 or parts[0] != SLUG or
+                    any(part in {"", ".", ".."} for part in parts) or
+                    "\\" in name or ":" in name):
+                fail("Claude ZIP must contain only one top-level skill folder")
+        required = [f"{SLUG}/SKILL.md", f"{SLUG}/scripts/skillctl.py"]
+        for name in required:
+            if name not in names or not bundle.read(name).strip():
+                fail(f"Claude ZIP missing required file: {name}")
+        if not any(n.startswith(f"{SLUG}/references/") and not n.endswith("/")
+                   and bundle.read(n).strip() for n in names):
+            fail("Claude ZIP missing references/ contents")
+        try:
+            text = bundle.read(required[0]).decode("utf-8")
+            match = re.match(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|$)", text, re.S)
+            if not match:
+                fail("SKILL.md requires bounded YAML frontmatter")
+            document = yaml.safe_load(match.group(1))
+        except (UnicodeError, yaml.YAMLError):
+            fail("SKILL.md has invalid YAML frontmatter")
+        if not isinstance(document, dict):
+            fail("SKILL.md frontmatter must be a mapping")
+        for field, limit in (("name", 64), ("description", 200)):
+            value = document.get(field)
+            if not isinstance(value, str) or not value.strip() or len(value) > limit:
+                fail(f"SKILL.md {field} must be a nonempty string of at most {limit} characters")
+        if document["name"] != SLUG:
+            fail("SKILL.md name must match the skill folder")
+
+
 def package(tag: str, output_dir: Path) -> tuple[Path, Path]:
     verify_tag(tag)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -163,6 +202,7 @@ def package(tag: str, output_dir: Path) -> tuple[Path, Path]:
             info.external_attr = 0o100644 << 16
             bundle.writestr(info, path.read_bytes().replace(b"\r\n", b"\n"))
 
+    validate_claude_zip(archive)
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     checksums = output_dir / "SHA256SUMS"
     checksums.write_text(f"{digest}  {archive.name}\n", encoding="ascii", newline="\n")

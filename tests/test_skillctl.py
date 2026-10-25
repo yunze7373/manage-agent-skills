@@ -11,6 +11,30 @@ from typing import Any
 from unittest import mock
 
 
+# Suite-wide safety net: no test may fall back to the developer's agent homes.
+# Individual fixtures may override these with their own temporary directories.
+import atexit
+import os
+_SUITE_HOME = tempfile.TemporaryDirectory(prefix="skillctl-tests-home-")
+_HOME_PATCH = mock.patch.object(Path, "home", return_value=Path(_SUITE_HOME.name))
+_HOME_PATCH.start()
+_ENV_PATCH = mock.patch.dict(os.environ, {
+    "HOME": _SUITE_HOME.name, "USERPROFILE": _SUITE_HOME.name,
+    "CODEX_HOME": "",
+    "COPILOT_HOME": str(Path(_SUITE_HOME.name) / ".copilot"),
+    "HERMES_HOME": str(Path(_SUITE_HOME.name) / ".hermes"),
+    "OPENCLAW_HOME": str(Path(_SUITE_HOME.name) / ".openclaw"),
+    "OPENCLAW_CONFIG_PATH": str(Path(_SUITE_HOME.name) / ".openclaw/openclaw.json"),
+    "GEMINI_CLI_HOME": _SUITE_HOME.name,
+    "XDG_CONFIG_HOME": str(Path(_SUITE_HOME.name) / ".config"),
+    "OPENCODE_CONFIG": "", "OPENCODE_CONFIG_DIR": "",
+})
+_ENV_PATCH.start()
+atexit.register(_SUITE_HOME.cleanup)
+atexit.register(_HOME_PATCH.stop)
+atexit.register(_ENV_PATCH.stop)
+
+
 SCRIPT = (
     Path(__file__).parents[1]
     / "skills"

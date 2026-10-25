@@ -1,11 +1,26 @@
 ---
 name: manage-agent-skills
-description: Find installed skills by task or description, including disabled skills, and enable exact matches when requested. Audit and manage skill visibility on Codex, Claude Code, Copilot CLI, OpenClaw, Hermes, Antigravity, Gemini CLI, and OpenCode. Use when users need a skill, cannot find one, or want fewer active skills. Does not install skills or measure actual token savings.
+description: Find, audit and manage installed agent skills across eight hosts. Use to locate missing or disabled skills, diagnose duplicate or outdated manager copies, and change skill visibility on request.
 metadata:
-  version: "1.1.1"
+  version: "1.1.2"
 ---
 
 # Manage Agent Skills
+
+## First: installation self-check (v1.1.2)
+
+Before running any command, resolve this SKILL.md's own directory and check that
+`scripts/skillctl.py` exists **inside that directory** using the host's file tool
+or `Test-Path` / `test -f`. Do not search for a different installed copy to run.
+If it is missing, STOP and tell the user:
+
+> 安装不完整，请重新上传完整 zip。当前技能版本：1.1.2。
+> 从 https://github.com/yunze7373/manage-agent-skills/releases/tag/v1.1.2
+> 下载 manage-agent-skills-v1.1.2.zip，在 Claude 的 Upload a skill 中上传完整 ZIP，不能只上传 SKILL.md。
+
+Do not guess commands, recreate the missing script, or continue the workflow.
+If present, continue below. `doctor` reports the executing manager version;
+older uploads cannot acquire this self-check until the user replaces the upload.
 
 Use `scripts/skillctl.py` for on-demand discovery and scoped changes. Resolve
 this skill's directory first; use `python` or `python3` available on the host.

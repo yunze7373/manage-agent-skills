@@ -136,3 +136,22 @@ selected layer. Local configuration is not live verification or version certific
 Claude Desktop/Cowork and account-hosted skill pools are outside these local
 adapters. Manage them in their host UI. This is a current adapter boundary,
 not a claim that future account APIs can never support management.
+
+
+## Claude Desktop / synced diagnostic copies (2026-10-25)
+
+`doctor` and `audit` additionally read `~/.claude/skills/synced/**/SKILL.md`.
+Use repeatable `--claude-desktop-root <absolute-skills-plugin-directory>` before
+`doctor` or `audit` to inspect Desktop copies, including nested account/session
+folders. Pass the actual observed `Claude-Data/.../skills-plugin` directory.
+These diagnostic roots never enter search/enable/disable/preset target discovery.
+Snapshots have unknown activation; duplicate identity does not prove all copies
+are active. Older manager versions, unknown versions and missing scripts are
+reported per path; no snapshot is changed. Symlink aliases are deduplicated.
+
+Desktop's private cache location varies by installation and is not an official
+stable discovery contract, so automatic whole-AppData/home scanning is deliberately
+unsupported. Explicit roots allow bounded read-only diagnosis without guessing.
+Official references: [Claude skills](https://code.claude.com/docs/en/skills),
+[custom skill upload](https://support.claude.com/en/articles/12512180-use-skills-in-claude).
+The observed `anthropic-skills` prefix is a Desktop observation, not authorship.

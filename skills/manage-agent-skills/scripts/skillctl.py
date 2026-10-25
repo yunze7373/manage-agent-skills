@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 CODEX_BEGIN = "# BEGIN MANAGE_AGENT_SKILLS:CODEX"
 CODEX_END = "# END MANAGE_AGENT_SKILLS:CODEX"
 CODEX_LEGACY_BEGIN = "# BEGIN CODEX_SKILL_MANAGER"
@@ -771,9 +771,11 @@ class CodexAdapter:
 class ClaudeAdapter:
     name = "claude"
 
-    def __init__(self, cwd: Path, config: Path | None = None) -> None:
+    def __init__(self, cwd: Path, config: Path | None = None,
+                 desktop_roots: list[Path] | None = None) -> None:
         self.cwd = cwd
         self.config = config or Path.home() / ".claude" / "settings.json"
+        self.desktop_roots = desktop_roots or []
 
     def available(self) -> tuple[bool, str]:
         return True, str(self.config)
@@ -790,6 +792,15 @@ class ClaudeAdapter:
                 self.cwd, ".claude", "claude", SKILL_GLOB_FLAT, True
             ),
         ]
+
+    def diagnostic_copies(self) -> list[Skill]:
+        """Read-only cache inventory, deliberately excluded from mutation discovery."""
+        roots = [(Path.home() / ".claude" / "skills" / "synced",
+                  "claude-synced", "snapshot:claude", SKILL_GLOB_DEEP)]
+        roots.extend((root, "claude-desktop", "snapshot:desktop", SKILL_GLOB_DEEP)
+                     for root in self.desktop_roots)
+        return [Skill(**{**asdict(item), "state": "unknown"})
+                for item in scan_roots(self.name, roots)]
 
     def _load(self) -> dict[str, Any]:
         if not self.config.exists():
@@ -1919,7 +1930,7 @@ def adapters(args: argparse.Namespace) -> list[Any]:
         if name == "codex":
             result.append(CodexAdapter(args.cwd, args.codex_config, args.codex_selector))
         elif name == "claude":
-            result.append(ClaudeAdapter(args.cwd, args.claude_config))
+            result.append(ClaudeAdapter(args.cwd, args.claude_config, getattr(args, "claude_desktop_root", None)))
         elif name == "copilot":
             result.append(CopilotAdapter(args.cwd, args.copilot_config))
         elif name == "openclaw":
@@ -1975,7 +1986,7 @@ def status_payload(
                 **context_counts,
             }
         )
-    return {"platforms": platforms}
+    return {"version": VERSION, "platforms": platforms}
 
 
 def audit_payload(
@@ -1991,6 +2002,10 @@ def audit_payload(
     for adapter in selected:
         try:
             inventory = apply_group_rules(adapter.discover(), rules or {})
+            if isinstance(adapter, ClaudeAdapter):
+                known = {str(Path(item.path).resolve()) for item in inventory}
+                inventory.extend(item for item in adapter.diagnostic_copies()
+                                 if str(Path(item.path).resolve()) not in known)
         except (SystemExit, OSError, ValueError, subprocess.TimeoutExpired):
             add(adapter.name, "error", "discovery_failed", "Inspect platform configuration locally; raw config is not included.")
             continue
@@ -2008,6 +2023,20 @@ def audit_payload(
                 add(adapter.name, "warning", str(exc), item.identity, item.path)
                 continue
             name = metadata.get("name")
+            if name == "manage-codex-skills" or Path(item.path).parent.name == "manage-codex-skills":
+                add(adapter.name, "info", "replaceable_legacy_manager",
+                    "Codex-only predecessor: migrate to manage-agent-skills after checking local customizations; no files changed.", item.path)
+            if name == "manage-agent-skills" or Path(item.path).parent.name == "manage-agent-skills":
+                meta = metadata.get("metadata")
+                version = meta.get("version") if isinstance(meta, dict) else None
+                if not isinstance(version, str) or not re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", version):
+                    add(adapter.name, "warning", "manager_version_unknown", "No comparable stable version; inspect or re-upload the full ZIP.", item.path)
+                elif tuple(map(int, version.split("."))) < tuple(map(int, VERSION.split("."))):
+                    add(adapter.name, "warning", "outdated_manager", f"Installed {version}; executing manager {VERSION} (not a remote latest check).", item.path)
+                if not (Path(item.path).parent / "scripts" / "skillctl.py").is_file():
+                    add(adapter.name, "warning", "incomplete_manager", "安装不完整，请重新上传完整 zip", item.path)
+            if item.origin.startswith("snapshot:"):
+                add(adapter.name, "info", "readonly_snapshot", "Cache copy only; activation and precedence unknown. Update through Claude, not this directory.", item.path)
             if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name) or len(name) > 64:
                 add(adapter.name, "warning", "nonportable_name", "Host may accept this name, but the portable specification does not.", item.path)
             elif name != Path(item.path).parent.name:
@@ -2053,6 +2082,7 @@ def audit_payload(
                 "Local skill roots and one configuration layer only; extension, system and per-agent policies require host verification.")
     return {
         "schema_version": 1,
+        "version": VERSION,
         "evidence_scope": "local configuration and installed metadata; no live prompt verification",
         "findings": findings,
         "skills": inventories,
@@ -2217,6 +2247,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--codex-selector", choices=("path", "name"), default="path",
                         help="Use documented paths (default); name requires host-specific verification.")
     parser.add_argument("--claude-config", type=Path)
+    parser.add_argument("--claude-desktop-root", type=Path, action="append",
+                        help="Explicit Desktop skills-plugin root; read-only doctor/audit scan, repeatable.")
     parser.add_argument("--copilot-config", type=Path)
     parser.add_argument("--gemini-config", type=Path)
     parser.add_argument("--gemini-scope", choices=("user", "workspace"), default="user")
@@ -2310,6 +2342,7 @@ def emit(value: Any, as_json: bool) -> None:
         print(json.dumps(value, ensure_ascii=False, indent=2))
         return
     if isinstance(value, dict) and "platforms" in value:
+        print(f"manage-agent-skills version={value.get('version', VERSION)}")
         for row in value["platforms"]:
             counts = " ".join(f"{state}={row[state]:3}" for state in STATES)
             print(
@@ -2322,6 +2355,8 @@ def emit(value: Any, as_json: bool) -> None:
             )
             if row.get("error"):
                 print(f"  error={row['error']}")
+        for row in value.get("findings", []):
+            print(f"{row['platform']}: {row['severity']} {row['code']}: {row['detail']} {row['path']}")
         return
     if isinstance(value, dict) and "findings" in value:
         for row in value["findings"]:
@@ -2362,8 +2397,13 @@ def main() -> int:
     rules = load_group_rules(args.groups)
     if args.command in {"doctor", "status"}:
         payload = status_payload(selected, rules)
+        if args.command == "doctor":
+            diagnostics = audit_payload(selected, rules)
+            payload["findings"] = diagnostics["findings"]
+            payload["diagnostic_skills"] = diagnostics["skills"]
         emit(payload, args.json)
-        return int(any(row["error"] for row in payload["platforms"]))
+        return int(any(row["error"] for row in payload["platforms"]) or
+                   any(row["severity"] == "error" for row in payload.get("findings", [])))
     if args.command == "audit":
         payload = audit_payload(selected, rules)
         emit(payload, args.json)

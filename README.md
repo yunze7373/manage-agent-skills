@@ -32,6 +32,54 @@ Built by [Han (@yunze7373)](https://github.com/yunze7373) ·
 
 ---
 
+## 上传到 Claude（claude.ai / Desktop）
+
+当前版本 **v1.1.2**。从 [GitHub Release](https://github.com/yunze7373/manage-agent-skills/releases/tag/v1.1.2)
+下载 `manage-agent-skills-v1.1.2.zip`，或在仓库执行：
+
+```text
+python scripts/release.py package v1.1.2 --output-dir dist/v1.1.2
+```
+
+必须上传 `dist/vX.Y.Z/manage-agent-skills-vX.Y.Z.zip`，保留文件夹结构，
+**不能只传 SKILL.md，也不要上传 GitHub 的 Source code ZIP**：
+
+```text
+manage-agent-skills/
+  SKILL.md
+  scripts/skillctl.py
+  references/...
+```
+
+在 Claude 的 Customize > Skills 中选择 + / Create skill > Upload a skill，上传完整 ZIP。
+按账号设置启用代码执行和技能。官方依据（2026-10-25 核对）：
+[使用技能](https://support.claude.com/en/articles/12512180-use-skills-in-claude) 与
+[创建自定义技能](https://support.claude.com/en/articles/12512198-how-to-create-custom-skills)。
+发布校验采用当前帮助文档较严格的描述长度上限 200 字符；scripts 和 references 是本技能的必需文件，
+并非所有 Claude 技能都必须有。校验通过说明结构符合这些检查，不等于账号上传已实测成功。
+
+2026-10-25 用户在 Desktop Code 标签页实测：上传后显示为
+`anthropic-skills:manage-agent-skills`，与官方技能位于同一个 skills-plugin 缓存。
+这是该 Desktop 版本的装载/命名空间行为，**不代表作者是 Anthropic**；作者是 Han / yunze7373。
+官方[插件技能文档](https://code.claude.com/docs/en/skills)解释插件命名空间，
+但未承诺该私有缓存路径和 `anthropic-skills` 前缀始终不变。
+
+调用时先检查同目录脚本，缺失即提示“安装不完整，请重新上传完整 zip”并停止。
+已有旧上传不会自动获得新自检，需在 Claude 中重新上传。运行 `doctor --json` 查看执行器 `version`；
+`audit` 比较已发现副本与执行器版本，不联网推断最新版本。claude.ai 云端执行环境不能据此访问本机安装目录。
+
+## 从 manage-codex-skills 迁移
+
+`manage-codex-skills` 是 Codex 专用前身；本技能覆盖其盘点、搜索、启停、分组和预设管理用途。
+但不是逐命令无差异替换：旧工具内置的个人 `lean/all` 策略需转为显式 preset JSON，
+分组需转为 `--groups` 文件；默认使用路径规则，名称规则兼容模式需核对宿主支持。
+不要把旧命令参数直接复制执行。先运行新工具 `--platform codex audit --json`，
+核对现有规则，再用相同目标 `--dry-run` 对照。旧工具的管理块继续由已有兼容逻辑处理。
+
+`audit` 将名为 `manage-codex-skills` 的副本标为 `replaceable_legacy_manager`，提示可以迁移；
+这不证明本地自定义脚本完全等价。保留旧文件与配置，人工确认自定义预设后再决定停用旧入口。
+本次检测不会删除、移动或改写任何已安装技能。
+
 ## Why
 
 New in v1.1.1: description search,
